@@ -1,26 +1,140 @@
 import numpy as np
+import pandas as pd
 from scipy.linalg import cholesky
 import pyorbs
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pyorbs.pyorbs_det import process_meas_record
+import multiprocessing as mp
+import _config
 
-class UKF():
-    def __init__(self, P, t_start, x0, Q, R, alpha = 1e-3, beta = 2.0, kappa = 0.0):
-        self.cov_matrix = P
+
+class Trajectories:
+    """ Класс сигма-точек, протягивающий орбиту по измерениям
+        для каждой точки.
+    """
+    # Количество сигма точек
+    N: int
+
+    # Набор сигма точек
+    sigma_points: np.ndarray
+
+    # Набор измерений
+    measure: pd.DataFrame
+
+    # Время начала фильтрации
+    t_start: datetime
+
+    def __init__(
+            self,
+            N: int,
+            sigma_points,
+            measurements,
+            t_start
+        ) -> None:
+        """
+        Args:
+            N: Количество сигма точек.
+            sigma_points: набор сигма точек.
+            measurements: набор измерений.
+            t_start: время начала фильтрации.
+            
+        """
+        self.N = N
+        self.sigma_points = sigma_points
+        self.measure = measurements
         self.t_start = t_start
-        self.state = x0
-        self.Q = Q
-        self.R = R
-        self.alpha = alpha
-        self.beta = beta
-        self.kappa = kappa
 
-        self.dim_x = len(x0)
-        self.par_lambda = alpha**2 * (self.dim_x + kappa) - self.dim_x
 
-        self.set_weights()
+    def to_pyorbs_orbit(self, t_end) -> pyorbs.pyorbs.orbit:
 
-        self.Y = np.zeros((2 * self.dim_x + 1, self.dim_x))
+        for i in range (self.N):
+            orb = pyorbs.pyorbs.orbit(x = self.sigma_points[i, :6], time = self.t_start)
+            orb.move(t = t_end)
+            self.Y[i, :6] = orb.state_v
+
+    def set_residuals(self) -> np.ndarray:
+
+        orb = pyorbs.pyorbs.orbit(x = sigma_points[i, :6], time = self.t_start + k * timedelta(seconds = dt))
+        for i in range (len(self.x)):
+            orbit = pyorbs.pyorbs.orbit(x = self.sigma_points[i, :6], time = self.t_start)
+        dz = process_meas_record()
+    
+
+class UKF:
+    """ Класс, реализующий сигматочечный фильтр Калмана
+    """
+    # Ковариационнная матрица вектора состояния 
+    cov_matrix: np.ndarray
+
+    # Время, с которого начинается фильтрация
+    t_start: datetime
+
+    # Вектор состояния
+    state: np.ndarray
+
+    # Ковариационная матрица процесса
+    Q: np.ndarray | None = None
+
+    # Ковариационная матрица измерений
+    R: np.ndarray | None = None
+
+    # Параметры для разложения Холесского
+    alpha: float = None
+
+    kappa: float = None
+
+    # Параметр для инициализации веса ковариации
+    beta: float | None = None
+
+    # Размерность вектора динамической системы
+    dim_x: int = None
+
+    # Параметр для разложения Холесского
+    par_lambda: float | None = None
+
+    # Матрица преобразованных сигма точек
+    Y: np.ndarray = None
+
+    def __init__(
+            self, 
+            P: np.ndarray,
+            t_start: datetime,
+            x: np.ndarray,
+            Q: np.ndarray | None,
+            R: np.ndarray | None,
+            alpha: float = _config.DEFAULT_ALPHA,
+            beta: float =  _config.DEFAULT_BETA,
+            kappa: float = _config.DEFAULT_KAPPA
+        ) -> None:
+            """Конструктор сигматочечного фильтра Калмана
+            
+            Args:
+                P: Ковариационная матрица вектора состояния.
+                t_start: Время начала предсказания.
+                x: Вектор состояния.
+                Q: Ковариационная матрица процесса.
+                R: Ковариационная матрица наблюдения.
+                alpha: Параметр для опредения параметра /lambda для вычисления корня в разложении Холесского.
+                beta: Параметр для инициализации веса w0 ковариации.
+                kappa: Параметр для опредения параметра /lambda для вычисления корня в разложении Холесского.
+
+            """
+            self.cov_matrix = P
+            self.t_start = t_start
+            self.state = x
+            self.Q = Q
+            self.R = R
+            self.alpha = alpha
+            self.beta = beta
+            self.kappa = kappa
+
+            self.dim_x = len(x)
+            self.par_lambda = alpha**2 * (self.dim_x + kappa) - self.dim_x
+
+            self.set_weights()
+
+            self.Y = np.zeros((2 * self.dim_x + 1, self.dim_x))
+
 
     def set_weights(self):
         n_sigma = 2 * self.dim_x + 1
@@ -30,7 +144,7 @@ class UKF():
         self.w_mean[0] = self.par_lambda / (self.dim_x + self.par_lambda)
         self.w_cov[0] = self.w_mean[0] + (1 - self.alpha**2 + self.beta)
 
-    def generate_sigma_points(self):
+    def generate_sigma_points(self) -> np.ndarray:
         n = self.dim_x
         sigma_points = np.zeros((2 * n + 1, n))
         sigma_points[0] = self.state
@@ -46,7 +160,7 @@ class UKF():
 
         return sigma_points
     
-    def prediction(self, k, dt):
+    def prediction(self, k: float, dt: float):
         n = self.dim_x
         # 1. Создание сигма-точек:
         sigma_points = self.generate_sigma_points()
