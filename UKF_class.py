@@ -3,33 +3,45 @@ import pandas as pd
 from scipy.linalg import cholesky
 import pyorbs
 from datetime import datetime, timedelta
-from pyorbs.pyorbs_det import process_meas_record
 import multiprocessing as mp
 import _config
+from functools import partial
+
+def process_single_orbit(orbit, measurements):
+    """ Вспомогательная функция для обработки одной орбиты
+    """
+    all_residuals = []
+    for i, m in enumerate(measurements):
+        meas = pyorbs.pyorbs_det.process_meas_record(orbit, m, 6, None)
+        res = meas['res']
+        all_residuals.append(res)
+
+    return all_residuals
 
 
 class Trajectories:
     """ Класс сигма-точек, протягивающий орбиту по измерениям
         для каждой точки.
     """
+    
     # Количество сигма точек
     N: int
 
     # Набор сигма точек
-    sigma_points: np.ndarray
+    sigma_points: np.ndarray | None = None
 
     # Набор измерений
-    measure: pd.DataFrame
+    measure: pd.DataFrame | None = None
 
     # Время начала фильтрации
-    t_start: datetime
+    t_start: datetime | None = None
 
     def __init__(
             self,
             N: int,
-            sigma_points,
-            measurements,
-            t_start
+            sigma_points: np.ndarray | None = None,
+            measurements: pd.DataFrame | None = None,
+            t_start: datetime | None = None
         ) -> None:
         """
         Args:
@@ -45,20 +57,31 @@ class Trajectories:
         self.t_start = t_start
 
 
-    def to_pyorbs_orbit(self, t_end) -> pyorbs.pyorbs.orbit:
-
+    def to_pyorbs_orbits(self) -> list[pyorbs.pyorbs.orbit]:
+        """ Функция, возвращающая список орбит в формате pyorbs
+        """
+        orb_list = []
         for i in range (self.N):
-            orb = pyorbs.pyorbs.orbit(x = self.sigma_points[i, :6], time = self.t_start)
-            orb.move(t = t_end)
-            self.Y[i, :6] = orb.state_v
+            orb = pyorbs.pyorbs.orbit(
+                x = self.sigma_points[i, :6], time = self.t_start
+            )
+            orb_list.append(orb)
+
+        return orb_list
 
     def set_residuals(self) -> np.ndarray:
+        """ Выдает невязки по измерениям для всех сигма точек
+        во все моменты времени, взятые из таблицы измерений.
+        """
+        orbits = self.to_pyorbs_orbits()
+        meas = pyorbs.pyorbs_det.Measurements(self.measure)
+        worker_func = partial(process_single_orbit, measurements = meas.tolist())
 
-        orb = pyorbs.pyorbs.orbit(x = sigma_points[i, :6], time = self.t_start + k * timedelta(seconds = dt))
-        for i in range (len(self.x)):
-            orbit = pyorbs.pyorbs.orbit(x = self.sigma_points[i, :6], time = self.t_start)
-        dz = process_meas_record()
-    
+        with mp.Pool(processes = 4) as pool:
+            dz = pool.map(worker_func, orbits)
+
+        return np.array(dz)
+
 
 class UKF:
     """ Класс, реализующий сигматочечный фильтр Калмана
@@ -183,18 +206,24 @@ class UKF:
         # 4. Создаем экземпляр каждой преобразованной
         #    сигма-точки по измерению: 
 
-        Z = np.array([self.h(point) for point in self.Y])
-
+        #Z = np.array([self.h(point) for point in self.Y])
+        sigma_points = self.generate_sigma_points()
+        traj = Trajectories(N = 2 * self.dim_x + 1, sigma_points = sigma_points,
+                            measurements = z, t_start=self.t_start)
+        dz = traj.set_residuals()
+        dz = dz[:, 0, :, 0]
+        print(f"DZ = {dz}")
+        dz = Z - self.w_mean @ Z # Z можем найти
         # 5. Вычисляем предсказанное среднее и предсказанную
         #    ковариационную матрицу:
-        z_mean = self.w_mean @ Z
+        #z_mean = self.w_mean @ Z
         P_z = (self.w_cov[:, None, None] * (
-               (Z-z_mean)[:, :, None] @ (Z-z_mean)[:, None, :])
+               dz[:, :, None] @ dz[:, None, :])
                ).sum(axis = 0) + self.R
-        
+        print(P_z)
         # 6. Вычисляем перекрестную ковариацию:
         P_yz = (self.w_cov[:, None, None] * (
-               (self.Y-y_mean)[:, :, None] @ (Z-z_mean)[:, None, :])
+               (self.Y-y_mean)[:, :, None] @ (dz)[:, None, :])
                ).sum(axis = 0)
         
         # 7. Вычисляем матрицу усиления:

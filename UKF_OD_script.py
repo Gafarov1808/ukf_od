@@ -36,7 +36,7 @@ def main():
 
     ukf = UKF(
         t_start = t_start,
-        P = P0, x0 = x0.state_v, Q = Q, R = R,
+        P = P0, x = x0.state_v, Q = Q, R = R,
         alpha = 1e-3, beta = 2.0, kappa = 0.0)
 
     ctx = ContextOD(obj_id = obj_id, initial_orbit = x0, 
