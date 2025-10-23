@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import multiprocessing as mp
 import _config
 from functools import partial
-
+_DEG2RAD = np.pi / 180.
 def process_single_orbit(orbit, measurements):
     """ Вспомогательная функция для обработки одной орбиты
     """
@@ -81,6 +81,12 @@ class Trajectories:
             dz = pool.map(worker_func, orbits)
 
         return np.array(dz)
+    
+    def find_Z_from_dz(self, w, dz):
+        A = np.eye(self.N) - np.outer(w, np.ones(self.N))
+        Z = np.linalg.solve(A, dz / 3600 * _DEG2RAD)
+
+        return Z
 
 
 class UKF:
@@ -213,10 +219,13 @@ class UKF:
         dz = traj.set_residuals()
         dz = dz[:, 0, :, 0]
         print(f"DZ = {dz}")
-        dz = Z - self.w_mean @ Z # Z можем найти
+
+        Z = traj.find_Z_from_dz(self.w_mean, dz)
+        print(Z)
         # 5. Вычисляем предсказанное среднее и предсказанную
         #    ковариационную матрицу:
-        #z_mean = self.w_mean @ Z
+        z_mean = self.w_mean @ Z
+        print(z_mean)
         P_z = (self.w_cov[:, None, None] * (
                dz[:, :, None] @ dz[:, None, :])
                ).sum(axis = 0) + self.R
@@ -233,7 +242,7 @@ class UKF:
             K = P_yz @ np.linalg.pinv(P_z)
 
         # 8. Вычисляем невязки по измерениям:
-        res_z = z - z_mean
+        res_z = np.array(z['val']) - z_mean
 
         # 9. Корректируем вектор состояния и ковариационную матрицу:
         self.state = y_mean + K @ res_z
