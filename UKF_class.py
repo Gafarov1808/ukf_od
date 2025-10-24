@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import multiprocessing as mp
 import _config
 from functools import partial
-_DEG2RAD = np.pi / 180.
+
 def process_single_orbit(orbit, measurements):
     """ Вспомогательная функция для обработки одной орбиты
     """
@@ -74,6 +74,7 @@ class Trajectories:
         во все моменты времени, взятые из таблицы измерений.
         """
         orbits = self.to_pyorbs_orbits()
+        
         meas = pyorbs.pyorbs_det.Measurements(self.measure)
         worker_func = partial(process_single_orbit, measurements = meas.tolist())
 
@@ -83,8 +84,9 @@ class Trajectories:
         return np.array(dz)
     
     def find_Z_from_dz(self, w, dz):
-        A = np.eye(self.N) - np.outer(w, np.ones(self.N))
-        Z = np.linalg.solve(A, dz / 3600 * _DEG2RAD)
+        W = np.ones((self.N, len(w))) * w
+        A = np.eye(self.N) - W
+        Z = np.linalg.solve(A, dz)
 
         return Z
 
@@ -107,9 +109,11 @@ class UKF:
     # Ковариационная матрица измерений
     R: np.ndarray | None = None
 
-    # Параметры для разложения Холесского
+    # Параметр отвечающий за разброс от вектора 
+    # состояния. Нужен для определения параметра лямбда
     alpha: float = None
 
+    # Второй параметр для определения лямбда
     kappa: float = None
 
     # Параметр для инициализации веса ковариации
@@ -184,20 +188,22 @@ class UKF:
             L = cholesky((n + self.par_lambda) * self.cov_matrix + np.eye(n) * 1e-8)
 
         for i in range(n):
-            sigma_points[i+1] = self.state + L[i]
-            sigma_points[i+1+n] = self.state - L[i]
+            sigma_points[i+1] = self.state + L[:, i]
+            sigma_points[i+1+n] = self.state - L[:, i]
 
         return sigma_points
     
-    def prediction(self, k: float, dt: float):
+    def prediction(self, t_k: pd.Timestamp):
         n = self.dim_x
+
         # 1. Создание сигма-точек:
         sigma_points = self.generate_sigma_points()
 
-        # 2. Получаем преобразованные сигма-точки:
-        for i in range (2*n + 1):
-            orb = pyorbs.pyorbs.orbit(x = sigma_points[i, :6], time = self.t_start + k * timedelta(seconds = dt))
-            orb.move(t = self.t_start + (k+1)*timedelta(seconds = dt))
+        # 2. Протягиваем сигма-точки по эволюции с помощью пакета pyorbs:
+        for i in range (2 * n + 1):
+            orb = pyorbs.pyorbs.orbit(x = sigma_points[i, :6], time = self.t_start)
+            orb.setup_parameters()
+            orb.move(t_k)
             self.Y[i, :6] = orb.state_v
 
         # 3. Предсказываем среднее и ковариационную матрицу:
@@ -209,27 +215,28 @@ class UKF:
         return y_mean, P_y
     
     def correction(self, z, y_mean, P_y):
-        # 4. Создаем экземпляр каждой преобразованной
-        #    сигма-точки по измерению: 
+        # 4. Создаем класс траекторий всех сигма точек и тянем их по
+        #    моментам времени, когда проводились измерения.
+        #    Возвращаем невязки по этим измерениям с помощью
+        #    пакета pyorbs:
 
-        #Z = np.array([self.h(point) for point in self.Y])
         sigma_points = self.generate_sigma_points()
+
         traj = Trajectories(N = 2 * self.dim_x + 1, sigma_points = sigma_points,
-                            measurements = z, t_start=self.t_start)
+                            measurements = z, t_start = self.t_start)
         dz = traj.set_residuals()
+        print(dz)
         dz = dz[:, 0, :, 0]
-        print(f"DZ = {dz}")
 
         Z = traj.find_Z_from_dz(self.w_mean, dz)
-        print(Z)
+
         # 5. Вычисляем предсказанное среднее и предсказанную
         #    ковариационную матрицу:
         z_mean = self.w_mean @ Z
-        print(z_mean)
         P_z = (self.w_cov[:, None, None] * (
                dz[:, :, None] @ dz[:, None, :])
                ).sum(axis = 0) + self.R
-        print(P_z)
+
         # 6. Вычисляем перекрестную ковариацию:
         P_yz = (self.w_cov[:, None, None] * (
                (self.Y-y_mean)[:, :, None] @ (dz)[:, None, :])
@@ -238,18 +245,22 @@ class UKF:
         # 7. Вычисляем матрицу усиления:
         try:
             K = P_yz @ np.linalg.inv(P_z)
+            print(f'K = {K}')
         except np.linalg.LinAlgError:
             K = P_yz @ np.linalg.pinv(P_z)
 
         # 8. Вычисляем невязки по измерениям:
-        res_z = np.array(z['val']) - z_mean
+        z_val = np.array([list(item) for item in z['val']])
+        res_z = z_val - z_mean
+        print(f'res = {res_z}')
 
         # 9. Корректируем вектор состояния и ковариационную матрицу:
-        self.state = y_mean + K @ res_z
+        self.state = y_mean + K @ res_z.T
         self.cov_matrix = P_y - K @ P_z @ K.T
 
         return self.state, self.cov_matrix
     
-    def step(self, z, k, dt):
-        y_mean, P_y = self.prediction(k, dt)
+    def step(self, z, t_k):
+        """ Шаг фильтрации"""
+        y_mean, P_y = self.prediction(t_k)
         return self.correction(z, y_mean, P_y)
