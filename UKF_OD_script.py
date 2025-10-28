@@ -38,19 +38,44 @@ def main():
         t_start = t_start,
         P = P0, Q = Q, R = R,
         x = x0.state_v, 
-        alpha = 0.4
+        alpha = 0.5200000100000001, #0.52  
+        kappa = -6.700000000000005e-07 #-3.0
     )
-
+    #print(ukf.state)
     ctx = ContextOD(obj_id = obj_id, initial_orbit = x0, 
-                    t_start = t_start, t_stop = t_end)
-    
+                    t_start = t_start, t_stop = t_end) 
     meas = ctx.meas_data
-    meas_time = meas['time'].tolist()
+    ukf.res_z = 1
+    #0.5200000200000001 -1.1399999999999901e-05
+    #res = [ 1.09313964 -0.35062547]
 
-    for m, t in zip(meas, meas_time):
-        ukf.step(m, t)
-        print(f'Уточнились на {t}: Оценка вектора состояния = {ukf.state}, '
-              f'оценка ковариационной матрицы = {ukf.cov_matrix}')
+    alpha = 0.5200000100000001
+    kappa = -6.700000000000005e-07
+    for index, m in meas.iterrows():
+        t = m['time']
+        for k in range (0, 1000000):
+            alpha += 1e-8
+            for j in range (0, 10000):
+                kappa -= 1e-8
+                print(ukf.alpha, ukf.kappa)
+                try:
+                    ukf = UKF(
+                        t_start = t_start,
+                        P = P0, Q = Q, R = R,
+                        x = x0.state_v,
+                        alpha= alpha, kappa = kappa 
+                    )
+                    ukf.step(m, t)
+                    print(f'res = {ukf.res_z}')
+                    if (np.linalg.norm(ukf.res_z) < 1e-6):
+                        print(f'Успех! {ukf.alpha}, {ukf.kappa}')
+                        exit()
+                except:
+                    pass
+
+        print(f'Уточнились на {t}:\n'
+              f'Оценка вектора состояния = {ukf.state}\n'
+              f'Oценка ковариационной матрицы = {ukf.cov_matrix}')
 
 if __name__ == "__main__":
     main()

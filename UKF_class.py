@@ -1,22 +1,22 @@
 import numpy as np
 import pandas as pd
 from scipy.linalg import cholesky
-import pyorbs
-from datetime import datetime, timedelta
+from datetime import datetime
 import multiprocessing as mp
-import _config
 import functools as ft
+import math
 
-def process_single_orbit(orbit, m):
-    """ Вспомогательная функция для обработки одной орбиты
+import pyorbs
+import _config
+
+def process_single_orbit(m, orbit):
+    """ Вспомогательная функция для протягивания одной траектории,
+    возвращает невязку в данный момоент времени.
     """
-    all_residuals = []
-    #for i, m in enumerate(measurements):
-    meas = pyorbs.pyorbs_det.process_meas_record(orbit, m, 6, None)
+    meas = pyorbs.pyorbs_det.process_meas_record(orbit, m, 6, None) #setup_parameters ???
     res = meas['res']
-    all_residuals.append(res)
 
-    return all_residuals
+    return res
 
 
 class Trajectories:
@@ -31,7 +31,7 @@ class Trajectories:
     sigma_points: np.ndarray | None = None
 
     # Набор измерений
-    measure: pd.DataFrame | None = None
+    measurements: pd.DataFrame | None = None
 
     # Время начала фильтрации
     t_start: datetime | None = None
@@ -52,7 +52,8 @@ class Trajectories:
             N: Количество сигма точек.
             sigma_points: набор сигма точек.
             measurements: набор измерений.
-            t_start: время начала фильтрации.
+            t_start: начальный момент времени.
+            t_k: время, до которого протягиваем орбиту.
             
         """
         self.N = N
@@ -76,23 +77,25 @@ class Trajectories:
 
     def set_residuals(self) -> np.ndarray:
         """ Выдает невязки по измерениям для всех сигма точек
-        во в момент времени t_cur, взятый из таблицы измерений.
+        в момент времени t_cur, взятый из таблицы измерений.
         """
         orbits = self.to_pyorbs_orbits()
-        
-        meas = pyorbs.pyorbs_det.Measurements(self.measure)
-        #worker_func = ft.partial(process_single_orbit, measurements = meas.tolist())
-        print(f'm = {meas}')
+        fixed_meas = ft.partial(process_single_orbit, self.measure)
+
         with mp.Pool(processes = mp.cpu_count()) as pool:
-            dz = pool.map(process_single_orbit, orbits, meas)
+            dz = pool.map(fixed_meas, orbits)
 
         return np.array(dz)
     
     def find_Z_from_dz(self, w, dz):
-        W = np.ones((self.N, len(w))) * w
+        W = np.tile(w, (self.N, 1))
         A = np.eye(self.N) - W
         Z = np.linalg.solve(A, dz)
 
+        Z = Z % (2 * math.pi)
+        if (Z[:,1] > math.pi).any():
+            Z[:,1] -= 2 * math.pi
+        #print(f'Z = {Z}')
         return Z
 
 
@@ -132,6 +135,9 @@ class UKF:
 
     # Матрица преобразованных сигма точек
     Y: np.ndarray = None
+
+    # Невязка измерения
+    res_z: float = None
 
     def __init__(
             self, 
@@ -190,7 +196,7 @@ class UKF:
         try:
             L = cholesky((n + self.par_lambda) * self.cov_matrix)
         except np.linalg.LinAlgError:
-            L = cholesky((n + self.par_lambda) * self.cov_matrix + np.eye(n) * 1e-8)
+            L = cholesky((n + self.par_lambda) * self.cov_matrix + np.eye(n) * 1e-5)
 
         for i in range(n):
             sigma_points[i+1] = self.state + L[:, i]
@@ -216,10 +222,20 @@ class UKF:
         P_y = (self.w_cov[:, None, None] * (
                (self.Y-y_mean)[:, :, None] @ (self.Y-y_mean)[:, None, :])
                ).sum(axis = 0) + self.Q
-        print(f'Prediction is done')
+
         return y_mean, P_y
     
-    def correction(self, z, y_mean, P_y, t_k):
+    def correction(self, z: pd.DataFrame, y_mean: np.ndarray,
+                    P_y: np.ndarray, t_k: pd.Timestamp):
+        """
+        Args:
+            z: таблица с измерениями из класса ContextOD.
+            y_mean: предсказанный вектор состояния в момент времени t_k.
+            P_y: предсказанная ковариационная матрица вектора 
+            состояния в момент времени t_k.
+            t_k: время, на которое предсказываем и корректируем данные.
+        """
+
         # 4. Создаем класс траекторий всех сигма точек и тянем их по
         #    моментам времени, когда проводились измерения.
         #    Возвращаем невязки по этим измерениям с помощью
@@ -229,10 +245,9 @@ class UKF:
 
         traj = Trajectories(N = 2 * self.dim_x + 1, sigma_points = sigma_points,
                             measurements = z, t_start = self.t_start, t_k = t_k)
+        
         dz = traj.set_residuals()
-        print(dz)
-        dz = dz[:, 0, :, 0]
-
+        dz = dz[:, :, 0]
         Z = traj.find_Z_from_dz(self.w_mean, dz)
 
         # 5. Вычисляем предсказанное среднее и предсказанную
@@ -250,21 +265,23 @@ class UKF:
         # 7. Вычисляем матрицу усиления:
         try:
             K = P_yz @ np.linalg.inv(P_z)
-            print(f'K = {K}')
         except np.linalg.LinAlgError:
             K = P_yz @ np.linalg.pinv(P_z)
 
-        # 8. Вычисляем невязки по измерениям:
-        z_val = np.array([list(item) for item in z['val']])
-        res_z = z_val - z_mean
-        print(f'res = {res_z}')
+        # 8. Вычисляем невязку по измерениям:
+        self.res_z = z['val'] - z_mean
+        #print(f'z_val = {z['val']}, z_mean = {z_mean}')
+        #print(f'res_z = {self.res_z}')
 
         # 9. Корректируем вектор состояния и ковариационную матрицу:
-        self.state = y_mean + K @ res_z.T
+        self.state = y_mean + K @ self.res_z.T
         self.cov_matrix = P_y - K @ P_z @ K.T
 
         return self.state, self.cov_matrix
-    
+
+    def smoothing(self): # функция сглаживания
+        pass
+
     def step(self, z, t_k):
         """ Шаг фильтрации"""
         y_mean, P_y = self.prediction(t_k)
