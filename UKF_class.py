@@ -5,16 +5,16 @@ import pyorbs
 from datetime import datetime, timedelta
 import multiprocessing as mp
 import _config
-from functools import partial
+import functools as ft
 
-def process_single_orbit(orbit, measurements):
+def process_single_orbit(orbit, m):
     """ Вспомогательная функция для обработки одной орбиты
     """
     all_residuals = []
-    for i, m in enumerate(measurements):
-        meas = pyorbs.pyorbs_det.process_meas_record(orbit, m, 6, None)
-        res = meas['res']
-        all_residuals.append(res)
+    #for i, m in enumerate(measurements):
+    meas = pyorbs.pyorbs_det.process_meas_record(orbit, m, 6, None)
+    res = meas['res']
+    all_residuals.append(res)
 
     return all_residuals
 
@@ -36,12 +36,16 @@ class Trajectories:
     # Время начала фильтрации
     t_start: datetime | None = None
 
+    # Время, до которого тянутся траектории
+    t_k: datetime | None = None
+
     def __init__(
             self,
             N: int,
             sigma_points: np.ndarray | None = None,
             measurements: pd.DataFrame | None = None,
-            t_start: datetime | None = None
+            t_start: datetime | None = None,
+            t_k: datetime | None = None
         ) -> None:
         """
         Args:
@@ -55,6 +59,7 @@ class Trajectories:
         self.sigma_points = sigma_points
         self.measure = measurements
         self.t_start = t_start
+        self.t_cur = t_k
 
 
     def to_pyorbs_orbits(self) -> list[pyorbs.pyorbs.orbit]:
@@ -71,15 +76,15 @@ class Trajectories:
 
     def set_residuals(self) -> np.ndarray:
         """ Выдает невязки по измерениям для всех сигма точек
-        во все моменты времени, взятые из таблицы измерений.
+        во в момент времени t_cur, взятый из таблицы измерений.
         """
         orbits = self.to_pyorbs_orbits()
         
         meas = pyorbs.pyorbs_det.Measurements(self.measure)
-        worker_func = partial(process_single_orbit, measurements = meas.tolist())
-
-        with mp.Pool(processes = 4) as pool:
-            dz = pool.map(worker_func, orbits)
+        #worker_func = ft.partial(process_single_orbit, measurements = meas.tolist())
+        print(f'm = {meas}')
+        with mp.Pool(processes = mp.cpu_count()) as pool:
+            dz = pool.map(process_single_orbit, orbits, meas)
 
         return np.array(dz)
     
@@ -211,10 +216,10 @@ class UKF:
         P_y = (self.w_cov[:, None, None] * (
                (self.Y-y_mean)[:, :, None] @ (self.Y-y_mean)[:, None, :])
                ).sum(axis = 0) + self.Q
-
+        print(f'Prediction is done')
         return y_mean, P_y
     
-    def correction(self, z, y_mean, P_y):
+    def correction(self, z, y_mean, P_y, t_k):
         # 4. Создаем класс траекторий всех сигма точек и тянем их по
         #    моментам времени, когда проводились измерения.
         #    Возвращаем невязки по этим измерениям с помощью
@@ -223,7 +228,7 @@ class UKF:
         sigma_points = self.generate_sigma_points()
 
         traj = Trajectories(N = 2 * self.dim_x + 1, sigma_points = sigma_points,
-                            measurements = z, t_start = self.t_start)
+                            measurements = z, t_start = self.t_start, t_k = t_k)
         dz = traj.set_residuals()
         print(dz)
         dz = dz[:, 0, :, 0]
@@ -263,4 +268,4 @@ class UKF:
     def step(self, z, t_k):
         """ Шаг фильтрации"""
         y_mean, P_y = self.prediction(t_k)
-        return self.correction(z, y_mean, P_y)
+        return self.correction(z, y_mean, P_y, t_k)

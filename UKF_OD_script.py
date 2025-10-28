@@ -47,8 +47,8 @@ def main():
     meas = ctx.meas_data
     meas_time = meas['time'].tolist()
 
-    for t in meas_time:
-        ukf.step(meas, t)
+    for m, t in zip(meas, meas_time):
+        ukf.step(m, t)
         print(f'Уточнились на {t}: Оценка вектора состояния = {ukf.state}, '
               f'оценка ковариационной матрицы = {ukf.cov_matrix}')
 
