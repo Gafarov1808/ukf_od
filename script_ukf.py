@@ -1,5 +1,6 @@
 import numpy as np
-from datetime import timedelta
+from typing import List
+from datetime import timedelta, datetime
 from sqlalchemy import select
 
 from models import UKF, smoothing
@@ -8,7 +9,9 @@ from kiamdb.orbits import OrbitSolution, SessionOrbits
 from kiamdb.od import ContextOD
 from pyorbs.pyorbs import orbit
 
-def get_initial_params(obj_id: int):
+def get_initial_params(obj_id: int) \
+    -> tuple[np.ndarray[np.float64], List[np.float64] | None, datetime | None]:
+    
     sq = select(OrbitSolution).where(
         OrbitSolution.obj_id == obj_id
     ).order_by(OrbitSolution.time_obtained.asc()).limit(1)
@@ -16,16 +19,18 @@ def get_initial_params(obj_id: int):
     with SessionOrbits() as session:
         res = session.scalar(sq)
 
-    b_initial = np.array(res.state)
-    P_initial = res.cov
-    epoch = res.epoch
+    if res is not None:
+        b_initial = np.array(res.state)
+        P_initial = res.cov
+        epoch = res.epoch
 
     return b_initial, P_initial, epoch
 
 def main():
     obj_id = 26629
     x0, P0, t_start = get_initial_params(obj_id = obj_id)
-    t_end = t_start + timedelta(days = 15)
+    if t_start is not None:
+        t_end = t_start + timedelta(days = 15)
 
     ukf = UKF(
         t_start = t_start,
@@ -41,7 +46,7 @@ def main():
     forward_states = []
     forward_covs = []
 
-    for index, m in meas.iterrows():
+    for m in meas.iterrows():
         t = m['time']
         ukf.step(m, t)
 

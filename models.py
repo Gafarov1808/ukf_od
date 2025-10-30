@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from typing import List
 from scipy.linalg import cholesky
 from datetime import datetime
 import multiprocessing as mp
@@ -8,7 +9,8 @@ import functools as ft
 import pyorbs
 import _config
 
-def process_single_orbit(m, orbit):
+def process_single_orbit(m: pd.DataFrame, 
+                         orbit: pyorbs.pyorbs.orbit) -> np.ndarray[np.float64]:
     """ Вспомогательная функция для протягивания одной траектории,
     возвращает невязку в данный момент времени.
     """
@@ -27,7 +29,7 @@ class Trajectories:
     N: int
 
     # Набор сигма точек
-    sigma_points: np.ndarray | None = None
+    sigma_points: np.ndarray[np.float64] | None = None
 
     # Набор измерений
     measurements: pd.DataFrame | None = None
@@ -41,7 +43,7 @@ class Trajectories:
     def __init__(
             self,
             N: int,
-            sigma_points: np.ndarray | None = None,
+            sigma_points: np.ndarray[np.float64] | None = None,
             measurements: pd.DataFrame | None = None,
             t_start: datetime | None = None,
             t_k: datetime | None = None
@@ -55,7 +57,6 @@ class Trajectories:
             t_k: время, до которого протягиваем орбиту.
             
         """
-        self.N = N
         self.sigma_points = sigma_points
         self.measure = measurements
         self.t_start = t_start
@@ -74,7 +75,7 @@ class Trajectories:
 
         return orb_list
 
-    def set_residuals(self) -> np.ndarray:
+    def set_residuals(self) -> np.ndarray[np.float64]:
         """ Выдает невязки по измерениям для всех сигма точек
         в момент времени t_cur, взятый из таблицы измерений.
         """
@@ -93,47 +94,47 @@ class UKF:
         матрицы по массиву измерений, взятых из ContextOD.
     """
     # Ковариационнная матрица вектора состояния 
-    cov_matrix: np.ndarray
+    cov_matrix: np.ndarray[np.float64]
 
     # Время, с которого начинается фильтрация
-    t_start: datetime
+    t_start: datetime | None
 
     # Вектор состояния
-    state_v: np.ndarray
+    state_v: np.ndarray[np.float64]
 
     # Ковариационная матрица процесса
-    Q: np.ndarray | None = None
+    Q: np.ndarray[np.float64] | None = None
 
     # Ковариационная матрица измерений
-    R: np.ndarray | None = None
+    R: np.ndarray[np.float64] | None = None
 
     # Параметр отвечающий за разброс от вектора 
     # состояния. Нужен для определения параметра лямбда
-    alpha: float = None
+    alpha: float
 
     # Второй параметр для определения лямбда
-    kappa: float = None
+    kappa: float
 
     # Параметр для инициализации веса ковариации
     beta: float | None = None
 
     # Размерность вектора состояния динамической системы
-    dim_x: int = None
+    dim_x: int
 
     # Параметр для разложения Холесского
     par_lambda: float | None = None
 
     # Матрица преобразованных сигма точек
-    Y: np.ndarray = None
+    Y: np.ndarray[np.float64]
 
     # Массив сигма точек
-    sigma_points: np.ndarray = None
+    sigma_points: np.ndarray[np.float64]
 
     def __init__(
             self, 
-            P: np.ndarray,
+            P: np.ndarray[np.float64],
             t_start: datetime,
-            x: np.ndarray,
+            x: np.ndarray[np.float64],
             R: np.ndarray = _config.R_DEFAULT,
             alpha: float = _config.DEFAULT_ALPHA,
             beta: float =  _config.DEFAULT_BETA,
@@ -157,7 +158,6 @@ class UKF:
             self.t_start = t_start
             self.state_v = x
             self.Q = np.zeros((dim_x, dim_x))
-            self.R = R
             self.alpha = alpha
             self.beta = beta
             self.kappa = kappa
@@ -178,7 +178,7 @@ class UKF:
         self.w_mean[0] = self.par_lambda / (self.dim_x + self.par_lambda)
         self.w_cov[0] = self.w_mean[0] + (1 - self.alpha**2 + self.beta)
 
-    def generate_sigma_points(self) -> np.ndarray:
+    def generate_sigma_points(self) -> np.ndarray[np.float64]:
         """
             Создает массив сигма точек вектора состояния,
             образующий окрестность.  
@@ -198,7 +198,8 @@ class UKF:
 
         return sigma_points
     
-    def prediction(self, t_k: pd.Timestamp):
+    def prediction(self, t_k: pd.Timestamp) \
+          -> tuple[np.ndarray[np.float64], np.ndarray[np.float64]]:
         n = self.dim_x
 
         # 1. Создание сигма-точек:
@@ -275,14 +276,16 @@ class UKF:
         return self.correction(z, y_mean, P_y, t_k)
 
 
-def smoothing(ukf, forward_states, forward_covs, meas):
+def smoothing(ukf: UKF, forward_states: List[np.float64], 
+              forward_covs: List[np.float64], meas: pd.DataFrame) \
+                    -> tuple[List[np.float64], List[np.float64]]:
     """Процесс сглаживания оценок вектора состояния 
     и ковариационной матрицы.
     """
     pred_states = []
     pred_covs = []
 
-    for index, m in meas.iterrows():
+    for m in meas.iterrows():
         t = m['time']
         y_mean, P_y = ukf.prediction(t)
         pred_states.append(y_mean)
