@@ -2,8 +2,7 @@ import numpy as np
 from typing import List
 from datetime import timedelta, datetime
 from sqlalchemy import select
-
-from models import UKF, smoothing
+from models import UKF
 
 from kiamdb.orbits import OrbitSolution, SessionOrbits
 from kiamdb.od import ContextOD
@@ -42,25 +41,20 @@ def main():
                     t_start = t_start, t_stop = t_end) 
     meas = ctx.meas_data
 
-    forward_states = []
-    forward_covs = []
-
     for _, m in meas.iterrows():
-
         t = m['time'].to_pydatetime()
         ukf.step(m, t)
-
-        forward_states.append(ukf.state_v)
-        forward_covs.append(ukf.cov_matrix)
         print(f'Уточнились на {t}')
-
-    smoothing_states, smoothing_covs = smoothing(ukf, forward_states, forward_covs, meas)
+        
+    ukf.draw_plots()
     
-    time_list = meas['time'].tolist()
-    for l in range(len(smoothing_states)):
-        print(f'Время {time_list[l]}:\n'
-              f'Оценка вектора состояния: {smoothing_states[l]}\n'
-              f'Оценка ковариационной матрицы: {smoothing_covs[l]}')
+    #smoothing_states, smoothing_covs = ukf.rts_smoother()
+    
+    #time_list = meas['time'].tolist()
+    #for l in range(len(smoothing_states)):
+    #    print(f'Время {time_list[l]}:\n'
+    #          f'Оценка вектора состояния: {smoothing_states[l]}\n'
+    #          f'Оценка ковариационной матрицы: {smoothing_covs[l]}')
 
 if __name__ == "__main__":
     main()
