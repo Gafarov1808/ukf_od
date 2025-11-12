@@ -264,12 +264,9 @@ class UKF:
         for i in range(2 * n + 1):
             diff = (self.transform_points[i] - y_mean).reshape(-1, 1)
             P_y += self.w_cov[i] * (diff @ diff.T)
-        
         P_y += self.cov_process_matrix
-        P_y = 0.5 * (P_y + P_y.T)
-        min_eig = np.min(np.linalg.eigvals(P_y))
-        if min_eig < 1e-12:
-            P_y += 1e-15 * np.eye(n)
+        #print(P_y)
+        #print(np.linalg.eigvals(P_y))
 
         self.write_pred_data(y_mean, P_y)
         self.times.append(t_k)
@@ -306,20 +303,11 @@ class UKF:
                (Z - z_mean)[:, :, None] @ (Z - z_mean)[:, None, :])
                ).sum(axis = 0) + self.cov_matrix_measure
 
-        cond_number = np.linalg.cond(P_z)
-        if cond_number > 1e10:
-            reg_factor = 1e-8 * np.trace(P_z) / len(P_z)
-            P_z = P_z + reg_factor * np.eye(len(P_z))
-
         # 6. Вычисляем перекрестную ковариацию:
         P_yz = (self.w_cov[:, None, None] * (
                 (self.transform_points - y_mean)[:, :, None] @
                 (Z - z_mean)[:, None, :]
                 )).sum(axis = 0)
-        cond_number = np.linalg.cond(P_yz)
-        if cond_number > 1e10:
-            reg_factor = 1e-8 * np.trace(P_yz) / len(P_yz)
-            P_yz = P_yz + reg_factor * np.eye(len(P_yz))
 
         # 7. Вычисляем матрицу усиления:
         try:
@@ -329,12 +317,13 @@ class UKF:
 
         # 8. Вычисляем невязку по измерениям:
         res_z = z['val'] - z_mean
-
+        #print(res_z - dz) 
         # 9. Корректируем вектор состояния и ковариационную матрицу:
         self.state_v = y_mean + Kalman_gain @ res_z.T
         self.cov_matrix = P_y - Kalman_gain @ P_z @ Kalman_gain.T
         self.t_start = t_k
-
+        #print(self.cov_matrix)
+        #print(np.linalg.eigvals(self.cov_matrix))
         self.forward_states.append(self.state_v)
         self.forward_covs.append(self.cov_matrix)
 
