@@ -3,28 +3,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from typing import List
 from scipy.linalg import cholesky
-from datetime import datetime
-import multiprocessing as mp
-import functools as ft
 from math import *
 
 import pyorbs
 import _config
-
-def process_single_orbit(m: pd.DataFrame, 
-                         orbit: pyorbs.pyorbs.orbit) ->  pd.Series | np.ndarray | None:
-    """ Вспомогательная функция для протягивания одной траектории,
-    возвращает невязку в данный момент времени.
-    """
-    orbit.setup_parameters()
-    meas: pd.Series | pd.DataFrame | None = pyorbs.pyorbs_det.process_meas_record(orbit, m, 6, None)
-    
-    if meas is not None:
-        res: pd.Series | np.ndarray = meas['res']
-        return res
-
-    return
-
 
 class Trajectories:
     """ Класс сигма-точек, протягивающий орбиту по измерениям
@@ -38,21 +20,20 @@ class Trajectories:
     sigma_points: np.ndarray
 
     #: Набор измерений
-    measurements: pd.DataFrame 
+    measure: pd.DataFrame 
 
     #: Время начала фильтрации
     t_start: pyorbs.pyorbs.ephem_time
 
-    #: Время, до которого тянутся траектории
-    t_k: datetime | None = None
-
+    #: Флаг наличия больших невязок
+    big_residuals: bool = False
+    
     def __init__(
             self,
             amount_points: int,
             sigma_points: np.ndarray,
             measurements: pd.DataFrame,
             t_start: pyorbs.pyorbs.ephem_time,
-            t_k: datetime | None = None
         ) -> None:
         """
         Args:
@@ -67,7 +48,6 @@ class Trajectories:
         self.sigma_points = sigma_points
         self.measure = measurements
         self.t_start = t_start
-        self.t_cur = t_k
 
 
     def to_pyorbs_orbits(self) -> list[pyorbs.pyorbs.orbit]:
@@ -84,15 +64,21 @@ class Trajectories:
 
         return orb_list
 
-    def set_residuals(self) -> np.ndarray:
+    def set_residuals(self):
         """ Выдает невязки по измерениям для всех сигма точек
         в момент времени t_cur, взятый из таблицы измерений.
         """
         orbits = self.to_pyorbs_orbits()
-        fixed_meas = ft.partial(process_single_orbit, self.measure)
+        dz = []
 
-        with mp.Pool(processes = mp.cpu_count()) as pool:
-            dz = pool.map(fixed_meas, orbits)
+        for orbit in orbits:
+            orbit.setup_parameters()
+            m = pyorbs.pyorbs_det.process_meas_record(orbit, self.measure, 6, None)
+            if m['accepted'] == False:
+                print(f'большие невязки - пропуск')
+                self.big_residuals = True
+                return
+            dz.append(m['res'])
 
         return np.array(dz)
 
@@ -230,20 +216,16 @@ class UKF:
         sigma_points = np.zeros((2 * n + 1, n))
         sigma_points[0] = self.state_v
 
-        try:
-            SR_cov_matrix = cholesky((n + self.par_lambda) * self.cov_matrix)
-        except np.linalg.LinAlgError:
-            SR_cov_matrix = cholesky((n + self.par_lambda) * self.cov_matrix + np.eye(n) * 1e-5)
-
+        SR_cov = cholesky((n + self.par_lambda) * self.cov_matrix)
         for i in range(n):
-            sigma_points[i+1] = self.state_v + SR_cov_matrix[:, i]
-            sigma_points[i+1+n] = self.state_v - SR_cov_matrix[:, i]
+            sigma_points[i+1] = self.state_v + SR_cov[:, i]
+            sigma_points[i+1+n] = self.state_v - SR_cov[:, i]
 
         return sigma_points
     
     def prediction(self, t_k: pd.Timestamp) -> tuple[np.ndarray, np.ndarray]:
         n = self.dim_x
-
+        
         # 1. Создание сигма-точек:
         self.sigma_points = self.generate_sigma_points()
         self.all_sigma_points.append(self.sigma_points)
@@ -254,27 +236,24 @@ class UKF:
             orb.setup_parameters()
             orb.move(t_k)
             self.transform_points[i, :6] = orb.state_v
-            
+
         self.all_transform_points.append(self.transform_points)
 
         # 3. Предсказываем среднее и ковариационную матрицу.
-        # Ковариационную матрицу регуляризуем при необходимости:
-        y_mean = self.w_mean @ self.transform_points
-        P_y = np.zeros((n, n))
+        pred_state = self.w_mean @ self.transform_points
+        pred_cov = np.zeros((n, n))
         for i in range(2 * n + 1):
-            diff = (self.transform_points[i] - y_mean).reshape(-1, 1)
-            P_y += self.w_cov[i] * (diff @ diff.T)
-        P_y += self.cov_process_matrix
-        #print(P_y)
-        #print(np.linalg.eigvals(P_y))
+            diff = (self.transform_points[i] - pred_state).reshape(-1, 1)
+            pred_cov += self.w_cov[i] * (diff @ diff.T)
+        pred_cov += self.cov_process_matrix
 
-        self.write_pred_data(y_mean, P_y)
+        self.write_pred_data(pred_state, pred_cov)
         self.times.append(t_k)
 
-        return y_mean, P_y
+        return pred_state, pred_cov
     
-    def correction(self, z: pd.DataFrame, y_mean: np.ndarray,
-                    P_y: np.ndarray, t_k: pd.Timestamp) -> tuple[np.ndarray, np.ndarray]:
+    def correction(self, z: pd.DataFrame, pred_state: np.ndarray,
+                    pred_cov: np.ndarray, t_k: pd.Timestamp) -> tuple[np.ndarray, np.ndarray]:
         """
         Args:
             z: таблица с измерениями из класса ContextOD.
@@ -283,56 +262,74 @@ class UKF:
             состояния в момент времени t_k.
             t_k: время, на которое предсказываем и корректируем данные.
         """
-
+        a_priori_meas = z['val']
         # 4. Создаем класс траекторий всех сигма точек и тянем их по
         #    моментам времени, когда проводились измерения.
         #    Возвращаем невязки по этим измерениям с помощью
         #    пакета pyorbs:
+        n = self.dim_x
+        pred_sigma_points = np.zeros((2 * n + 1, n))
+        pred_sigma_points[0] = pred_state
+
+        pred_SR_cov = cholesky((n + self.par_lambda) * pred_cov)
+
+        for i in range(n):
+            pred_sigma_points[i+1] = pred_state + pred_SR_cov[:, i]
+            pred_sigma_points[i+1+n] = pred_state - pred_SR_cov[:, i]
+
         traj = Trajectories(amount_points = 2 * self.dim_x + 1,
-                            sigma_points = self.sigma_points,
+                            sigma_points = pred_sigma_points,
                             measurements = z,
-                            t_start = self.t_start, t_k = t_k)
+                            t_start = self.t_start)
         
-        dz = traj.set_residuals()[:, :, 0]
-        Z = z['val'] - dz
-        
+        res_meas = traj.set_residuals()
+
+        if traj.big_residuals == True:
+            return
+        res_meas = res_meas[:, :, 0]
+        сalc_measure = a_priori_meas - res_meas 
+
         # 5. Вычисляем предсказанное среднее и предсказанную
         #    ковариационную матрицу:
-        z_mean = self.w_mean @ Z
-        P_z = (self.w_cov[:, None, None] * (
-               (Z - z_mean)[:, :, None] @ (Z - z_mean)[:, None, :])
+        pred_meas = self.w_mean @ сalc_measure
+        Pz = (self.w_cov[:, None, None] * (
+               (сalc_measure - pred_meas)[:, :, None] @
+               (сalc_measure - pred_meas)[:, None, :])
                ).sum(axis = 0) + self.cov_matrix_measure
 
         # 6. Вычисляем перекрестную ковариацию:
-        P_yz = (self.w_cov[:, None, None] * (
-                (self.transform_points - y_mean)[:, :, None] @
-                (Z - z_mean)[:, None, :]
+        Pyz = (self.w_cov[:, None, None] * (
+                (pred_sigma_points - pred_state)[:, :, None] @
+                (сalc_measure - pred_meas)[:, None, :]
                 )).sum(axis = 0)
 
         # 7. Вычисляем матрицу усиления:
         try:
-            Kalman_gain = P_yz @ np.linalg.inv(P_z)
+            Kalman_gain = Pyz @ np.linalg.inv(Pz)
         except np.linalg.LinAlgError:
-            Kalman_gain = P_yz @ np.linalg.pinv(P_z)
+            Kalman_gain = Pyz @ np.linalg.pinv(Pz)
 
         # 8. Вычисляем невязку по измерениям:
-        res_z = z['val'] - z_mean
-        #print(res_z - dz) 
+        res_z = a_priori_meas - pred_meas
+
         # 9. Корректируем вектор состояния и ковариационную матрицу:
-        self.state_v = y_mean + Kalman_gain @ res_z.T
-        self.cov_matrix = P_y - Kalman_gain @ P_z @ Kalman_gain.T
-        self.t_start = t_k
-        #print(self.cov_matrix)
-        #print(np.linalg.eigvals(self.cov_matrix))
+        self.state_v = pred_state + Kalman_gain @ res_z.T
+        self.cov_matrix = pred_cov - Kalman_gain @ Pz @ Kalman_gain.T
+        print((np.linalg.eigvals(self.cov_matrix)>0).all())
+        if (np.linalg.eigvals(self.cov_matrix)>0).all() == False:
+            print('regularization')
+            self.cov_matrix += np.eye(n) * 1e-5
+
         self.forward_states.append(self.state_v)
         self.forward_covs.append(self.cov_matrix)
-
+        #print(self.state_v)
+        self.t_start = t_k
         return self.state_v, self.cov_matrix
 
     def step(self, z: pd.DataFrame, t_k: pd.Timestamp):
         """ Шаг фильтрации."""
-        y_mean, P_y = self.prediction(t_k)
-        return self.correction(z, y_mean, P_y, t_k)
+        pred_state, pred_cov = self.prediction(t_k)
+        return self.correction(z, pred_state, pred_cov, t_k)
 
     def write_pred_data(self, y_mean, P_y):
         """ Записывает предсказанные данные"""
@@ -341,30 +338,31 @@ class UKF:
 
     def rts_smoother(self) -> tuple[List[np.float64], List[np.float64]]:
         """Процесс сглаживания оценок вектора состояния 
-        и ковариационной матрицы (Unscented Rauch-Tung-Striebel smoother).
+        и ковариационной матрицы (Unscented Rauch-Tung-Striebel smoother
+        for the additive dynamic system).
         """
         
         print(f'Процесс сглаживания начался...')
         smoothed_states = self.forward_states.copy()
         smoothed_covs = self.forward_covs.copy()
-
+        #print(self.w_cov)
         for k in range (len(self.forward_states)-2, -1, -1):
             print(k)
             cross_cov = np.zeros((self.dim_x, self.dim_x))
             for i in range (2 * self.dim_x + 1):
                 dif = (self.all_sigma_points[k][i] - self.forward_states[k]).reshape(-1,1)
-                dif_pred = (self.all_transform_points[k][i] - self.pred_states[k+1]).reshape(-1, 1)
+                dif_pred = (self.all_transform_points[k+1][i] - self.pred_states[k+1]).reshape(-1, 1)
                 cross_cov += self.w_cov[i] * (dif @ dif_pred.T)
-            
-            try:
-                G_k = cross_cov @ np.linalg.inv(self.pred_covs[k+1])
-            except:
-                G_k = cross_cov @ np.linalg.pinv(self.pred_covs[k+1])
 
-            smoothed_states[k] = self.forward_states[k] + G_k @ (smoothed_states[k+1] - self.pred_states[k+1])
-            smoothed_covs[k] = self.forward_covs[k] + G_k @ (smoothed_covs[k+1] - self.pred_covs[k+1]) @ G_k.T
-            smoothed_covs[k] = 0.5 * (smoothed_covs[k] + smoothed_covs[k].T)
-            print(smoothed_states[k], smoothed_covs[k])
+            try:
+                G = cross_cov @ np.linalg.inv(self.pred_covs[k+1])
+            except:
+                G = cross_cov @ np.linalg.pinv(self.pred_covs[k+1])
+
+            smoothed_states[k] = self.forward_states[k] + G @ (smoothed_states[k+1] - self.pred_states[k+1])
+            smoothed_covs[k] = self.forward_covs[k] + G @ (smoothed_covs[k+1] - self.pred_covs[k+1]) @ G.T
+
+            #print(smoothed_states[k], smoothed_covs[k])
         return smoothed_states, smoothed_covs
 
     def draw_plots(self):
