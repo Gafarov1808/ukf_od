@@ -1,5 +1,4 @@
 import numpy as np
-import pandas as pd
 from datetime import timedelta, datetime
 from sqlalchemy import select, cast, DateTime
 from models import UKF
@@ -7,6 +6,8 @@ from models import UKF
 from kiamdb.orbits import OrbitSolution, SessionOrbits
 from kiamdb.od import ContextOD
 from pyorbs.pyorbs import orbit
+from pyorbs.pyorbs_det import od_step
+from pyorbs.vis import plot_res
 
 def get_initial_params():
     sq = select(OrbitSolution).where(
@@ -23,9 +24,15 @@ def get_initial_params():
     epoch = res.epoch
     return obj, b_initial, P_initial, epoch
 
+def check_residuals(state, meas):
+    orb = orbit(x = state, time = meas.iloc[-1]['time'].to_pydatetime())
+    step = od_step(orb, meas)
+    plot_res(step.meas_tab)
+
 def main():
     obj, x0, P0, t_start = get_initial_params()
-    t_end = t_start + timedelta(days = 5)
+    x0 += np.array([1e-3, 1e-3, 1e-3, 1e-6, 1e-6, 1e-6])
+    t_end = t_start + timedelta(days = 15)
 
     ctx = ContextOD(obj_id = obj, initial_orbit = x0, 
                     t_start = t_start, t_stop = t_end) 
@@ -43,6 +50,7 @@ def main():
         
     smoothing_states, smoothing_covs = ukf.rts_smoother()
     ukf.draw_plots(smoothing_states, smoothing_covs)
+    check_residuals(smoothing_states[-1], meas)
 
 if __name__ == "__main__":
     main()

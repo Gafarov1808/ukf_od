@@ -76,7 +76,7 @@ class Trajectories:
         for orbit in self.orb_list:
             orbit.setup_parameters()
             m = pyorbs.pyorbs_det.process_meas_record(orbit, self.measure, 6, None)
-            dz.append(m['res'])
+            dz.append(m['res'] / 3600. * _config._DEG2RAD)
 
         return np.array(dz)
 
@@ -235,7 +235,7 @@ class UKF:
 
         # 3. Предсказываем среднее и ковариационную матрицу.
         pred_state = self.w_mean @ self.transform_points
-        
+
         pred_cov = np.zeros((self.dim_x, self.dim_x))
         for i in range (2 * self.dim_x + 1):
             diff = (self.transform_points[i] - pred_state).reshape(-1,1)
@@ -277,7 +277,7 @@ class UKF:
                 (self.sigma_points - pred_state)[:, :, None] @
                 (calc_measure - pred_meas)[:, None, :]
                 )).sum(axis = 0)
-
+        #print(self.sigma_points - pred_state)
         # 7. Вычисляем матрицу усиления:
         try:
             Kalman_gain = Pyz @ np.linalg.inv(Pz)
@@ -294,12 +294,11 @@ class UKF:
 
         if (np.linalg.eigvals(self.cov_matrix) > 0).all() == False:
             print('Регуляризация скорректированной ковариационной матрицы')
-            self.cov_matrix += np.diag([1e-8, 1e-8, 1e-8, 1e-10, 1e-10, 1e-10])
+            self.cov_matrix += np.eye(6) * 1e-9 #np.diag([1e-6, 1e-6, 1e-6, 1e-8, 1e-8, 1e-8])
 
         self.forward_states.append(self.state_v)
         self.forward_covs.append(self.cov_matrix)
         self.t_start = t_k
-
         return self.state_v, self.cov_matrix
 
     def step(self, z: pd.DataFrame, t_k: pd.Timestamp):
@@ -318,14 +317,339 @@ class UKF:
         for the additive dynamic system).
         """
         
-        print(f'Процесс сглаживания начался...')
+        print(f'Cглаживание...')
         smoothed_states = self.forward_states.copy()
         smoothed_covs = self.forward_covs.copy()
-
+        
         for k in range (len(self.forward_states)-2, -1, -1):
             cross_cov = np.zeros((self.dim_x, self.dim_x))
             for i in range (2 * self.dim_x + 1):
-                dif = (self.all_sigma_points[k][i] - self.forward_states[k]).reshape(-1,1)
+                dif = (self.all_transform_points[k][i] - self.forward_states[k]).reshape(-1,1)
+                dif_pred = (self.all_transform_points[k+1][i] - self.pred_states[k+1]).reshape(-1, 1)
+                cross_cov += self.w_cov[i] * (dif @ dif_pred.T)
+
+            try:
+                G = cross_cov @ np.linalg.inv(self.pred_covs[k+1])
+            except:
+                G = cross_cov @ np.linalg.pinv(self.pred_covs[k+1])
+
+            smoothed_states[k] = self.forward_states[k] + G @ (smoothed_states[k+1] - self.pred_states[k+1])
+            smoothed_covs[k] = self.forward_covs[k] + G @ (smoothed_covs[k+1] - self.pred_covs[k+1]) @ G.T
+
+        return smoothed_states, smoothed_covs
+
+    def draw_plots(self, smoothed_states, smoothed_covs):
+
+        sigma_x = [sqrt(arr[0,0]) for arr in smoothed_covs]
+        sigma_y = [sqrt(arr[1,1]) for arr in smoothed_covs]
+        sigma_z = [sqrt(arr[2,2]) for arr in smoothed_covs]
+
+        sigma_vx = [sqrt(arr[3,3]) for arr in smoothed_covs]
+        sigma_vy = [sqrt(arr[4,4]) for arr in smoothed_covs]
+        sigma_vz = [sqrt(arr[5,5]) for arr in smoothed_covs]
+        
+        plt.figure('Положение', figsize=(19,10))
+
+        plt.subplot(3, 1, 1)
+        plt.plot(self.times, sigma_x, '+')
+        plt.grid(True)
+        plt.title('СКО х')
+        plt.xlabel('Время')
+        plt.ylabel('$\sigma_x$')
+
+        plt.subplot(3, 1, 2)
+        plt.plot(self.times, sigma_y, '+')
+        plt.grid(True)
+        plt.title('СКО y')
+        plt.xlabel('Время')
+        plt.ylabel('$\sigma_y$')
+
+        plt.subplot(3, 1, 3)
+        plt.plot(self.times, sigma_z, '+')
+        plt.grid(True)
+        plt.title('СКО z')
+        plt.xlabel('Время')
+        plt.ylabel('$\sigma_z$')
+
+        plt.tight_layout()
+        plt.show()
+
+
+        plt.figure('Скорость', figsize=(19,10))
+
+        plt.subplot(3, 1, 1)
+        plt.plot(self.times, sigma_vx, '+')
+        plt.grid(True)
+        plt.title('СКО $V_x$')
+        plt.xlabel('Время')
+        plt.ylabel('$\sigma_{V_x}$')
+
+        plt.subplot(3, 1, 2)
+        plt.plot(self.times, sigma_vy, '+')
+        plt.grid(True)
+        plt.title('СКО $V_y$')
+        plt.xlabel('Время')
+        plt.ylabel('$\sigma_{V_y}$')
+
+        plt.subplot(3, 1, 3)
+        plt.plot(self.times, sigma_vz, '+')
+        plt.grid(True)
+        plt.title('СКО $V_z$')
+        plt.xlabel('Время')
+        plt.ylabel('$\sigma_{V_z}$')
+
+        plt.tight_layout()
+        plt.show()
+
+class SquareRootUKF:
+    """ Класс, реализующий сигматочечный фильтр Калмана.
+        Фильтрация вектора состояния и его ковариационной 
+        матрицы по массиву измерений, взятых из ContextOD.
+    """
+    #: Ковариационнная матрица вектора состояния 
+    cov_matrix: np.ndarray
+
+    #: Время, с которого начинается фильтрация
+    t_start: pyorbs.pyorbs.ephem_time
+
+    #: Вектор состояния
+    state_v: np.ndarray
+
+    #: Ковариационная матрица процесса
+    cov_process_matrix: np.ndarray
+
+    #: Ковариационная матрица измерений
+    cov_matrix_measure: np.ndarray | None = None
+
+    #: Параметр отвечающий за разброс от вектора 
+    # состояния. Нужен для определения параметра лямбда
+    alpha: float
+
+    #: Второй параметр для определения лямбда
+    kappa: float
+
+    #: Параметр для инициализации веса ковариации
+    beta: float
+
+    #: Размерность вектора состояния динамической системы
+    dim_x: int
+
+    #: Параметр для разложения Холесского
+    par_lambda: float
+
+    #: Матрица преобразованных сигма точек
+    transform_points: np.ndarray
+
+    #: Массив сигма точек
+    sigma_points: np.ndarray
+
+    #: Список предсказанных векторов состояния
+    pred_states: List = []
+
+    #: Список предсказанных ковариационных матриц 
+    pred_covs: List = []
+
+    #: Список скорректированных векторов состояния
+    forward_states: List = []
+
+    #: Список скорректированных ковариационннных матриц
+    forward_covs: List = []
+
+    #: Cписок моментов времени, в которые фильтруем данные
+    times: List = []
+
+    #: Список всех сигма точек
+    all_sigma_points: List = []
+
+    #: Список всех сигма точек, протянутых в моменты времени из списка times
+    all_transform_points: List = []
+
+    def __init__(
+            self, 
+            P: np.ndarray,
+            t_start: pyorbs.pyorbs.ephem_time,
+            x: np.ndarray,
+            R: np.ndarray = _config.R_DEFAULT,
+            alpha: float = _config.DEFAULT_ALPHA,
+            beta: float =  _config.DEFAULT_BETA,
+            kappa: float = _config.DEFAULT_KAPPA,
+            dim_x: int = _config.DEFAULT_DIMENSION,
+            pred_states: List = [],
+            pred_covs: List = [],
+            forward_states: List = [],
+            forward_covs: List = [],
+            times: List = [],
+            sigma_points: List = [],
+            all_transform_points: List = []
+        ) -> None:
+            """Конструктор сигматочечного фильтра Калмана
+            
+            Args:
+                P: Ковариационная матрица вектора состояния.
+                t_start: Время начала предсказания.
+                x: Вектор состояния.
+                Q: Ковариационная матрица процесса.
+                R: Ковариационная матрица наблюдения.
+                alpha: Параметр для опредения параметра /lambda для вычисления корня в разложении Холесского.
+                beta: Параметр для инициализации веса w0 ковариации.
+                kappa: Параметр для опредения параметра /lambda для вычисления корня в разложении Холесского.
+
+            """
+            self.cov_matrix = P
+            self.t_start = t_start
+            self.state_v = x
+            self.cov_process_matrix = np.zeros((dim_x, dim_x))
+            self.cov_matrix_measure = R
+            self.alpha = alpha
+            self.beta = beta
+            self.kappa = kappa
+
+            self.dim_x = dim_x
+            self.par_lambda = alpha**2 * (self.dim_x + kappa) - self.dim_x
+
+            self.set_weights()
+
+            self.transform_points = np.zeros((2 * self.dim_x + 1, self.dim_x))
+            self.pred_states = pred_states
+            self.pred_covs = pred_covs
+            self.forward_states = forward_states
+            self.forward_covs = forward_covs
+            self.times = times
+            self.sigma_points = sigma_points
+            self.all_transform_points = all_transform_points
+
+
+    def set_weights(self) -> None:
+        n_sigma = 2 * self.dim_x + 1
+        self.w_mean = np.full(n_sigma, 1.0 / (2.0 * (float(self.dim_x) + self.par_lambda)))
+        self.w_cov = self.w_mean.copy()
+
+        self.w_mean[0] = self.par_lambda / (self.dim_x + self.par_lambda)
+        self.w_cov[0] = self.w_mean[0] + (1 - self.alpha**2 + self.beta)
+
+    def cholupdate(self, S, dif, w):
+        
+        return 
+    
+    def generate_sigma_points(self) -> np.ndarray:
+        """ Создает массив сигма точек вектора состояния,
+            образующий окрестность."""
+        sigma_points = np.zeros((2 * self.dim_x + 1, self.dim_x))
+        sigma_points[0] = self.state_v
+
+        SR_cov = cholesky((self.dim_x + self.par_lambda) * self.cov_matrix)
+        for i in range(self.dim_x):
+            sigma_points[i+1] = self.state_v + SR_cov[:, i]
+            sigma_points[i+1+self.dim_x] = self.state_v - SR_cov[:, i]
+
+        return sigma_points
+   
+    def prediction(self, t_k: pd.Timestamp) -> tuple[np.ndarray, np.ndarray]:
+        # 1. Создание сигма-точек:
+        self.sigma_points = self.generate_sigma_points()
+        self.all_sigma_points.append(self.sigma_points)
+
+        # 2. Протягиваем сигма-точки по эволюции с помощью пакета pyorbs:
+        traj = Trajectories(amount_points = 2 * self.dim_x + 1,
+                            sigma_points = self.sigma_points,
+                            t_start = self.t_start,  t_k = t_k)
+        
+        self.transform_points = traj.get_transform_sigma_points()
+        self.all_transform_points.append(self.transform_points)
+
+        # 3. Предсказываем среднее и ковариационную матрицу.
+        pred_state = self.w_mean @ self.transform_points
+
+        QR_matrix = np.zeros((2 * self.dim_x, self.dim_x))
+        for i in range (1, 2 * len(self.dim_x) + 1):
+            QR_matrix[:, i] = sqrt(self.w_cov[1]) * (self.transform_points[i] - pred_state)
+        QR_matrix = np.vstack([QR_matrix, sqrt(self.cov_process_matrix)])
+        _, R = np.linalg.qr(QR_matrix)
+        SR_predict = self.cholupdate(R.T, self.all_transform_points[0] - pred_state, self.w_cov[0])
+
+        self.write_pred_data(pred_state, pred_cov)
+        self.times.append(t_k)
+
+        return pred_state, pred_cov, traj
+
+    def correction(self, z: pd.DataFrame, pred_state: np.ndarray,
+                    pred_cov: np.ndarray, t_k: pd.Timestamp, traj) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Args:
+            z: таблица с измерениями из класса ContextOD.
+            y_mean: предсказанный вектор состояния в момент времени t_k.
+            P_y: предсказанная ковариационная матрица вектора 
+            состояния в момент времени t_k.
+            t_k: время, на которое предсказываем и корректируем данные.
+        """
+        a_priori_meas = z['val']
+        # 4. Возвращаем невязки по измерениям с помощью
+        #    пакета pyorbs:
+        traj.measure = z
+        res_meas = traj.set_residuals()[:, :, 0]
+        calc_measure = a_priori_meas - res_meas 
+        
+        # 5. Вычисляем предсказанное среднее и предсказанную
+        #    ковариационную матрицу:
+        pred_meas = self.w_mean @ calc_measure
+        Pz = (self.w_cov[:, None, None] * (
+               (calc_measure - pred_meas)[:, :, None] @
+               (calc_measure - pred_meas)[:, None, :])
+               ).sum(axis = 0) + self.cov_matrix_measure
+
+        # 6. Вычисляем перекрестную ковариацию:
+        Pyz = (self.w_cov[:, None, None] * (
+                (self.sigma_points - pred_state)[:, :, None] @
+                (calc_measure - pred_meas)[:, None, :]
+                )).sum(axis = 0)
+        #print(self.sigma_points - pred_state)
+        # 7. Вычисляем матрицу усиления:
+        try:
+            Kalman_gain = Pyz @ np.linalg.inv(Pz)
+        except np.linalg.LinAlgError:
+            Kalman_gain = Pyz @ np.linalg.pinv(Pz)
+
+        # 8. Вычисляем невязку по измерениям:
+        res_z = a_priori_meas - pred_meas
+
+        # 9. Корректируем вектор состояния и ковариационную матрицу
+        # и регуляризируем ее, если необходимо:
+        self.state_v = pred_state + Kalman_gain @ res_z.T
+        self.cov_matrix = pred_cov - Kalman_gain @ Pz @ Kalman_gain.T
+
+        if (np.linalg.eigvals(self.cov_matrix) > 0).all() == False:
+            print('Регуляризация скорректированной ковариационной матрицы')
+            self.cov_matrix += np.eye(6) * 1e-9 #np.diag([1e-6, 1e-6, 1e-6, 1e-8, 1e-8, 1e-8])
+
+        self.forward_states.append(self.state_v)
+        self.forward_covs.append(self.cov_matrix)
+        self.t_start = t_k
+        return self.state_v, self.cov_matrix
+
+    def step(self, z: pd.DataFrame, t_k: pd.Timestamp):
+        """ Шаг фильтрации."""
+        pred_state, pred_cov, traj = self.prediction(t_k)
+        return self.correction(z, pred_state, pred_cov, t_k, traj)
+
+    def write_pred_data(self, y_mean, P_y):
+        """ Записывает предсказанные данные"""
+        self.pred_states.append(y_mean)
+        self.pred_covs.append(P_y)
+
+    def rts_smoother(self) -> tuple[List[np.float64], List[np.float64]]:
+        """Процесс сглаживания оценок вектора состояния 
+        и ковариационной матрицы (Unscented Rauch-Tung-Striebel smoother
+        for the additive dynamic system).
+        """
+        
+        print(f'Cглаживание...')
+        smoothed_states = self.forward_states.copy()
+        smoothed_covs = self.forward_covs.copy()
+        
+        for k in range (len(self.forward_states)-2, -1, -1):
+            cross_cov = np.zeros((self.dim_x, self.dim_x))
+            for i in range (2 * self.dim_x + 1):
+                dif = (self.all_transform_points[k][i] - self.forward_states[k]).reshape(-1,1)
                 dif_pred = (self.all_transform_points[k+1][i] - self.pred_states[k+1]).reshape(-1, 1)
                 cross_cov += self.w_cov[i] * (dif @ dif_pred.T)
 
