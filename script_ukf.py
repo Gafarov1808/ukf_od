@@ -1,7 +1,7 @@
 import numpy as np
 from datetime import timedelta, datetime
 from sqlalchemy import select, cast, DateTime
-from models import UKF
+from models import UKF, SquareRootUKF
 
 from kiamdb.orbits import OrbitSolution, SessionOrbits
 from kiamdb.od import ContextOD
@@ -31,13 +31,13 @@ def check_residuals(state, meas):
 
 def main():
     obj, x0, P0, t_start = get_initial_params()
-    x0 += np.array([1e-3, 1e-3, 1e-3, 1e-6, 1e-6, 1e-6])
     t_end = t_start + timedelta(days = 15)
 
     ctx = ContextOD(obj_id = obj, initial_orbit = x0, 
                     t_start = t_start, t_stop = t_end) 
     meas = ctx.meas_data
-    ukf = UKF(
+    #x0 += np.array([1e-3, 1e-3, 1e-3, 1e-6, 1e-6, 1e-6])
+    filter = SquareRootUKF(
         t_start = t_start,
         x = orbit(x = x0, time = t_start).state_v,
         P = P0
@@ -45,11 +45,12 @@ def main():
 
     for _, m in meas.iterrows():
         t = m['time'].to_pydatetime()
-        ukf.step(m, t)
+        filter.step(m, t)
+        print(filter.state_v)
         print(f'Уточнились на {t}')
         
-    smoothing_states, smoothing_covs = ukf.rts_smoother()
-    ukf.draw_plots(smoothing_states, smoothing_covs)
+    smoothing_states, smoothing_covs = filter.rts_smoother()
+    filter.draw_plots(smoothing_states, smoothing_covs)
     check_residuals(smoothing_states[-1], meas)
 
 if __name__ == "__main__":
