@@ -220,7 +220,7 @@ class UKF:
             sigma_points[i+1+self.dim_x] = self.state_v - SR_cov[:, i]
 
         return sigma_points
-   
+    
     def prediction(self, t_k: pd.Timestamp) -> tuple[np.ndarray, np.ndarray]:
         # 1. Создание сигма-точек:
         self.sigma_points = self.generate_sigma_points()
@@ -245,7 +245,7 @@ class UKF:
 
         self.write_pred_data(pred_state, pred_cov)
         self.times.append(t_k)
-
+        print(f'pred_state = {pred_state}')
         return pred_state, pred_cov, traj
 
     def correction(self, z: pd.DataFrame, pred_state: np.ndarray,
@@ -295,7 +295,7 @@ class UKF:
 
         if (np.linalg.eigvals(self.cov_matrix) > 0).all() == False:
             print('Регуляризация скорректированной ковариационной матрицы')
-            self.cov_matrix += np.eye(6) * 1e-7
+            self.cov_matrix += np.eye(6) * 1e-9
 
         self.forward_states.append(self.state_v)
         self.forward_covs.append(self.cov_matrix)
@@ -533,262 +533,54 @@ class SquareRootUKF:
         self.w_mean[0] = self.par_lambda / (self.dim_x + self.par_lambda)
         self.w_cov[0] = self.w_mean[0] + (1 - self.alpha**2 + self.beta)
 
-    def cholupdate(self, R, u, v, epsilon=1e-12, max_value=1e8):
-        n = R.shape[0]
-        
-        if np.any(np.isnan(R)) or np.any(np.isinf(R)):
-            print("WARNING: R contains NaN/Inf, using identity")
-            R = np.eye(n) * epsilon
-        
-        u = np.asarray(u, dtype=float).flatten()
-        if np.any(np.isnan(u)) or np.any(np.isinf(u)):
-            print("WARNING: u contains NaN/Inf, using zeros")
-            u = np.zeros(n)
-        
-        R_norm = np.linalg.norm(R)
-        if R_norm > max_value:
-            R = R * (max_value / R_norm)
-        
-        u_norm = np.linalg.norm(u)
-        if u_norm > max_value:
-            u = u * (max_value / u_norm)
-        
-        if np.abs(v) < epsilon or u_norm < epsilon:
-            return R
-        
-        try:
-            if v > 0:
-                return self._cholupdate_positive(R, u, v, epsilon, max_value)
-            else:
-                return self._cholupdate_negative(R, u, -v, epsilon, max_value)
-        except Exception as e:
-            print(f"cholupdate failed: {e}, using SVD fallback")
-            return self._cholupdate_svd_fallback(R, u, v, epsilon)
-
-    def _cholupdate_positive(self, R, u, v, epsilon, max_value):
+    def cholupdate(self, R, u, v):       
         n = R.shape[0]
         R_new = R.copy().astype(float)
         x = u.copy().astype(float)
-        
-        alpha = np.sqrt(v)
-        if alpha > max_value:
-            alpha = max_value
-        elif alpha < epsilon:
-            alpha = epsilon
+
+        if v > 0:
+            alpha = np.sqrt(v)
+            x = alpha * x
             
-        x = alpha * x
-        
-        for k in range(n):
-            if np.abs(x[k]) < epsilon:
-                continue
-                
-            r_old = R_new[k, k]
-            
-            if np.abs(r_old) > max_value:
-                r_old = max_value * np.sign(r_old)
-            if np.abs(x[k]) > max_value:
-                x[k] = max_value * np.sign(x[k])
-            
-            r_old_sq = r_old * r_old
-            x_k_sq = x[k] * x[k]
-            
-            if r_old_sq > max_value - x_k_sq:
-                scale = max_value / (r_old_sq + x_k_sq)
-                r_old_sq *= scale
-                x_k_sq *= scale
-                
-            r_new_sq = r_old_sq + x_k_sq
-            
-            if r_new_sq <= 0:
-                r_new = epsilon
-            else:
-                r_new = np.sqrt(r_new_sq)
-                if r_new > max_value:
-                    r_new = max_value
-            
-            if np.abs(r_old) > epsilon:
+            for k in range(n):
+                r_old = R_new[k, k]
+                r_old_sq = r_old * r_old
+                x_k_sq = x[k] * x[k]
+                r_new = np.sqrt(r_old_sq + x_k_sq)
                 c = r_new / r_old
                 s = x[k] / r_old
-            else:
-                c = 1.0
-                s = 0.0
-            
-            R_new[k, k] = r_new
-            
-            if k < n - 1:
-                for j in range(k + 1, n):
-                    old_val = R_new[k, j]
-                    x_j = x[j]
-                    
-                    if np.abs(old_val) > max_value:
-                        old_val = max_value * np.sign(old_val)
-                    if np.abs(x_j) > max_value:
-                        x_j = max_value * np.sign(x_j)
-                    if np.abs(s) > max_value:
-                        s = max_value * np.sign(s)
-                    
-                    new_r_val = (old_val + s * x_j) / c
-                    
-                    if np.abs(new_r_val) > max_value:
-                        new_r_val = max_value * np.sign(new_r_val)
-                        
-                    R_new[k, j] = new_r_val
-                    
-                    new_x_val = c * x_j - s * old_val
-                    if np.abs(new_x_val) > max_value:
-                        new_x_val = max_value * np.sign(new_x_val)
-                        
-                    x[j] = new_x_val
-        
-        return R_new
+                R_new[k, k] = r_new    
+                if k < n - 1:
+                    for j in range(k + 1, n):
+                        old_val = R_new[k, j]
+                        x_j = x[j]
+                        new_r_val = (old_val + s * x_j) / c
+                        R_new[k, j] = new_r_val
+                        new_x_val = c * x_j - s * old_val          
+                        x[j] = new_x_val
 
-    def _cholupdate_negative(self, R, u, v, epsilon, max_value):
-        n = R.shape[0]
-        R_new = R.copy().astype(float)
-        x = u.copy().astype(float)
-        
-        alpha = np.sqrt(v)
-        if alpha > max_value:
-            alpha = max_value
-        elif alpha < epsilon:
-            alpha = epsilon
-            
-        x = alpha * x
-        
-        for k in range(n):
-            if np.abs(x[k]) < epsilon:
-                continue
-                
-            r_old = R_new[k, k]
-            
-            if np.abs(r_old) > max_value:
-                r_old = max_value * np.sign(r_old)
-            if np.abs(x[k]) > max_value:
-                x[k] = max_value * np.sign(x[k])
-            
-            r_old_sq = r_old * r_old
-            x_k_sq = x[k] * x[k]
-            
-            if r_old_sq - x_k_sq < epsilon:
-                if r_old_sq >= epsilon:
-                    r_new = epsilon
+        else:
+            alpha = np.sqrt(-v)
+            x = alpha * x
+                    
+            for k in range(n):
+                r_old = R_new[k, k]
+                r_old_sq = r_old * r_old
+                x_k_sq = x[k] * x[k]
+                if r_old_sq - x_k_sq < 1e-24:
+                    r_new = 3e-3
                 else:
-                    r_new = epsilon
-            else:
-                r_new = np.sqrt(r_old_sq - x_k_sq)
-                if r_new > max_value:
-                    r_new = max_value
-            
-            if np.abs(r_old) > epsilon:
+                    r_new = np.sqrt(r_old_sq - x_k_sq)
+                
                 c = r_new / r_old
                 s = x[k] / r_old
-            else:
-                c = 1.0
-                s = 0.0
-            
-            R_new[k, k] = r_new
-            
-            if k < n - 1:
-                for j in range(k + 1, n):
-                    old_val = R_new[k, j]
-                    x_j = x[j]
-                    
-                    if np.abs(old_val) > max_value:
-                        old_val = max_value * np.sign(old_val)
-                    if np.abs(x_j) > max_value:
-                        x_j = max_value * np.sign(x_j)
-                    if np.abs(s) > max_value:
-                        s = max_value * np.sign(s)
-                    
-                    if np.abs(c) > epsilon:
-                        new_r_val = (old_val - s * x_j) / c
-                    else:
-                        new_r_val = old_val
-                    
-                    if np.abs(new_r_val) > max_value:
-                        new_r_val = max_value * np.sign(new_r_val)
-                        
-                    R_new[k, j] = new_r_val
-                    
-                    if np.abs(c) > epsilon:
-                        new_x_val = c * x_j - s * old_val
-                    else:
-                        new_x_val = x_j
-                        
-                    if np.abs(new_x_val) > max_value:
-                        new_x_val = max_value * np.sign(new_x_val)
-                        
-                    x[j] = new_x_val
-        
+                R_new[k, k] = r_new
+                if k < n - 1:
+                    for j in range(k + 1, n):
+                        R_new[k, j] = (R_new[k, j] - s * x[j]) / c
+                        x[j] = c * x[j] - s * R_new[k, j]
+
         return R_new
-
-    def _cholupdate_svd_fallback(self, R, u, v, epsilon):
-
-        n = R.shape[0]
-        
-        try:
-            P = R @ R.T
-            
-            update = v * np.outer(u, u)
-            P_new = P + update
-            
-            P_new = (P_new + P_new.T) / 2
-            
-            U, s, Vt = np.linalg.svd(P_new, full_matrices=False)
-            
-            s_clean = np.maximum(s, epsilon)
-            
-            original_trace = np.trace(P_new)
-            if original_trace <= 0:
-                original_trace = np.trace(P) if np.trace(P) > 0 else n
-                
-            recovered_trace = np.sum(s_clean)
-            
-            if recovered_trace > 0:
-                scale_factor = original_trace / recovered_trace
-                s_scaled = s_clean * scale_factor
-            else:
-                s_scaled = s_clean
-            
-            P_recovered = U @ np.diag(s_scaled) @ Vt
-            
-            sqrt_s = np.sqrt(s_scaled)
-            R_svd = U @ np.diag(sqrt_s)
-            
-            try:
-                R_triangular = np.linalg.cholesky(P_recovered)
-                return R_triangular
-            except:
-                return R_svd
-                
-        except Exception as e:
-            print(f"SVD fallback also failed: {e}, using identity")
-            return np.eye(n) * np.sqrt(epsilon)
-
-    def cholupdate_simple(self, R, u, v, epsilon=1e-12):
-        try:
-            if np.abs(v) < 1e-15 or np.linalg.norm(u) < 1e-15:
-                return R
-                
-            P_current = R @ R.T
-            update = v * np.outer(u, u)
-            P_new = P_current + update
-            
-            P_new = (P_new + P_new.T) / 2
-            
-            n = P_new.shape[0]
-            eigenvals = np.linalg.eigvalsh(P_new)
-            min_eig = np.min(eigenvals)
-            
-            if min_eig < epsilon:
-                P_new += (epsilon - min_eig) * np.eye(n)
-            
-            return np.linalg.cholesky(P_new)
-            
-        except Exception as e:
-            print(f"cholupdate_simple failed: {e}")
-            n = R.shape[0] if hasattr(R, 'shape') else len(u)
-            return np.eye(n) * np.sqrt(epsilon)
              
     def generate_sigma_points(self) -> np.ndarray:
         """ Создает массив сигма точек вектора состояния,
@@ -798,8 +590,8 @@ class SquareRootUKF:
 
         eta = self.alpha * np.sqrt(self.dim_x)
         for i in range(self.dim_x):
-            sigma_points[i+1] = self.state_v + eta * self.SR_cov[:, i]
-            sigma_points[i+1+self.dim_x] = self.state_v - eta * self.SR_cov[:, i]
+            sigma_points[i+1] = self.state_v + eta * self.SR_cov[i, :]
+            sigma_points[i+1+self.dim_x] = self.state_v - eta * self.SR_cov[i, :]
         return sigma_points
    
     def prediction(self, t_k: pd.Timestamp) -> tuple[np.ndarray, np.ndarray]:
@@ -817,17 +609,17 @@ class SquareRootUKF:
 
         # 3. Предсказываем среднее и ковариационную матрицу.
         pred_state = self.w_mean @ self.transform_points
-
+        print(f'pred_state = {pred_state}')
         QR_matrix = np.zeros((self.dim_x, 2 * self.dim_x))
         for i in range (2 * self.dim_x):
             QR_matrix[:, i] = sqrt(self.w_cov[1]) * (self.transform_points[i+1] - pred_state)
         QR_matrix = np.hstack([QR_matrix, scipy.linalg.sqrtm(self.cov_process_matrix)])
-        _, R = np.linalg.qr(QR_matrix)
+        _, R = np.linalg.qr(QR_matrix.T)
         R = R[:self.dim_x, :self.dim_x]
 
         SR_predict = self.cholupdate(R, self.transform_points[0] - pred_state, self.w_cov[0])
         pred_cov = SR_predict @ SR_predict.T
-        
+
         self.write_pred_data(pred_state, pred_cov)
         self.times.append(t_k)
 
@@ -849,7 +641,7 @@ class SquareRootUKF:
         traj.measure = z
         res_meas = traj.set_residuals()[:, :, 0]
         calc_measure = a_priori_meas - res_meas
-
+        print(res_meas)
         # 5. Вычисляем предсказанное среднее и предсказанную
         #    ковариационную матрицу:
         pred_meas = self.w_mean @ calc_measure
@@ -857,25 +649,17 @@ class SquareRootUKF:
         QR_matrix = np.zeros((2, 2 * self.dim_x))
         for i in range (2 * self.dim_x):
             QR_matrix[:, i] = sqrt(self.w_cov[1]) * (calc_measure[i+1] - pred_meas)
-        
-        min_variance = 1e-5
-        for j in range(2):
-            col_variance = np.var(QR_matrix[j, :])
-            if col_variance < min_variance:
-                #print(f"Column {j} has low variance {col_variance:.2e}, adding regularization")
-                QR_matrix[j, :] += np.random.normal(0, np.sqrt(min_variance), 2 * self.dim_x)
-
         QR_matrix = np.hstack([QR_matrix, scipy.linalg.sqrtm(self.cov_matrix_measure)])
-        _, R = np.linalg.qr(QR_matrix)
-        R = R[:2, :2].T
-        S = self.cholupdate(R, calc_measure[0]-pred_meas, self.w_cov[0])
+        _, R = np.linalg.qr(QR_matrix.T)
+        R = R[:2, :2]
+        S = self.cholupdate(R, calc_measure[0] - pred_meas, self.w_cov[0])
 
         # 6. Вычисляем перекрестную ковариацию:
         Pyz = (self.w_cov[:, None, None] * (
                 (self.sigma_points - pred_state)[:, :, None] @
                 (calc_measure - pred_meas)[:, None, :]
                 )).sum(axis = 0)
-        print(f'S = {S}')
+
         # 7. Вычисляем матрицу усиления:
         try:
             temp = scipy.linalg.solve_triangular(S, Pyz.T, lower=False)
@@ -891,8 +675,8 @@ class SquareRootUKF:
         U = Kalman_gain @ S
 
         SR_temp = SR_predict.copy()
-        for i in range(U.shape[1]):  
-            u_col = U[:, i]
+        for i in range(U.shape[1]):
+            u_col = U[:, i]        
             SR_temp = self.cholupdate(SR_temp, u_col, -1.0)
 
         self.SR_cov = SR_temp

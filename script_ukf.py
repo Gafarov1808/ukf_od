@@ -31,22 +31,19 @@ def check_residuals(state, meas):
 
 def main():
     obj, x0, P0, t_start = get_initial_params()
-    t_end = t_start + timedelta(days = 15)
+    t_end = t_start + timedelta(days = 10)
 
     ctx = ContextOD(obj_id = obj, initial_orbit = x0, 
                     t_start = t_start, t_stop = t_end) 
     meas = ctx.meas_data
     #x0 += np.array([1e-3, 1e-3, 1e-3, 1e-6, 1e-6, 1e-6])
-    filter = SquareRootUKF(
-        t_start = t_start,
-        x = orbit(x = x0, time = t_start).state_v,
-        P = P0
-    )
+    filter = SquareRootUKF(t_start = t_start, P = P0, 
+                           x = orbit(x = x0, time = t_start).state_v)
 
     for _, m in meas.iterrows():
         t = m['time'].to_pydatetime()
         filter.step(m, t)
-        print(filter.state_v)
+        print(f'state_v = {filter.state_v}')
         print(f'Уточнились на {t}')
         
     smoothing_states, smoothing_covs = filter.rts_smoother()
