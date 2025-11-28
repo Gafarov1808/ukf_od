@@ -11,8 +11,8 @@ from pyorbs.vis import plot_res
 
 def get_initial_params():
     sq = select(OrbitSolution).where(
-        OrbitSolution.obj_id == 20026,
-        cast(OrbitSolution.epoch, DateTime).between(datetime(2025,10,20), datetime(2025,11,2))  
+        OrbitSolution.obj_id == 4297,
+        cast(OrbitSolution.epoch, DateTime).between(datetime(2025,3,8), datetime(2025,3,10))  
     ).order_by(OrbitSolution.time_obtained.desc()).limit(1)
         
     with SessionOrbits() as session:
@@ -20,7 +20,7 @@ def get_initial_params():
 
     obj = res.obj_id
     b_initial = np.array(res.state)
-    P_initial = np.array(res.cov).reshape(7,7)[:6,:6] #np.array(res.cov).reshape(6,6) 
+    P_initial = np.array(res.cov).reshape(6,6) #np.array(res.cov).reshape(7,7)[:6,:6]  
     epoch = res.epoch
     return obj, b_initial, P_initial, epoch
 
@@ -31,21 +31,20 @@ def check_residuals(state, meas):
 
 def main():
     obj, x0, P0, t_start = get_initial_params()
-    t_end = t_start + timedelta(days = 10)
-
+    t_end = t_start + timedelta(days = 60)
     ctx = ContextOD(obj_id = obj, initial_orbit = x0, 
                     t_start = t_start, t_stop = t_end) 
     meas = ctx.meas_data
-    #x0 += np.array([1e-3, 1e-3, 1e-3, 1e-6, 1e-6, 1e-6])
-    filter = SquareRootUKF(t_start = t_start, P = P0, 
+    #x0 += np.array([1e-3, 1e-3, 1e-3, 1e-5, 1e-5, 1e-5])
+    filter = SquareRootUKF(t_start = t_start, P = P0,
                            x = orbit(x = x0, time = t_start).state_v)
-
+    
     for _, m in meas.iterrows():
         t = m['time'].to_pydatetime()
         filter.step(m, t)
-        print(f'state_v = {filter.state_v}')
+        #print(filter.state_v)
         print(f'Уточнились на {t}')
-        
+    
     smoothing_states, smoothing_covs = filter.rts_smoother()
     filter.draw_plots(smoothing_states, smoothing_covs)
     check_residuals(smoothing_states[-1], meas)

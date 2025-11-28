@@ -245,7 +245,7 @@ class UKF:
 
         self.write_pred_data(pred_state, pred_cov)
         self.times.append(t_k)
-        print(f'pred_state = {pred_state}')
+
         return pred_state, pred_cov, traj
 
     def correction(self, z: pd.DataFrame, pred_state: np.ndarray,
@@ -290,7 +290,7 @@ class UKF:
 
         # 9. Корректируем вектор состояния и ковариационную матрицу
         # и регуляризируем ее, если необходимо:
-        self.state_v = pred_state + Kalman_gain @ res_z.T
+        self.state_v = pred_state + Kalman_gain @ res_z
         self.cov_matrix = pred_cov - Kalman_gain @ Pz @ Kalman_gain.T
 
         if (np.linalg.eigvals(self.cov_matrix) > 0).all() == False:
@@ -349,55 +349,40 @@ class UKF:
         sigma_vy = [sqrt(arr[4,4]) for arr in smoothed_covs]
         sigma_vz = [sqrt(arr[5,5]) for arr in smoothed_covs]
         
-        plt.figure('Положение', figsize=(19,10))
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, sharex = True, figsize=(19,10))
+        fig.suptitle('Положение', fontsize = 16)
 
-        plt.subplot(3, 1, 1)
-        plt.plot(self.times, sigma_x, '+')
-        plt.grid(True)
-        plt.title('СКО х')
-        plt.xlabel('Время')
-        plt.ylabel('$\sigma_x$')
+        ax1.plot(self.times, sigma_x, '+', label = 'СКО х')
+        ax1.set_ylabel('$\sigma_x$')
+        ax1.grid(True)
 
-        plt.subplot(3, 1, 2)
-        plt.plot(self.times, sigma_y, '+')
-        plt.grid(True)
-        plt.title('СКО y')
-        plt.xlabel('Время')
-        plt.ylabel('$\sigma_y$')
+        ax2.plot(self.times, sigma_y, '+', label = 'СКО y')
+        ax2.set_ylabel('$\sigma_y$')
+        ax2.grid(True)
 
-        plt.subplot(3, 1, 3)
-        plt.plot(self.times, sigma_z, '+')
-        plt.grid(True)
-        plt.title('СКО z')
-        plt.xlabel('Время')
-        plt.ylabel('$\sigma_z$')
+        ax3.plot(self.times, sigma_z, '+', label = 'СКО z')
+        ax3.set_ylabel('$\sigma_z$')
+        ax3.set_xlabel('Время')
+        ax3.grid(True)
 
         plt.tight_layout()
         plt.show()
 
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, sharex = True, figsize=(19,10))
+        fig.suptitle('Скорость', fontsize = 16)
 
-        plt.figure('Скорость', figsize=(19,10))
+        ax1.plot(self.times, sigma_vx, '+', label = 'СКО $V_x$')
+        ax1.set_ylabel('$\sigma_{V_x}$')
+        ax1.grid(True)
 
-        plt.subplot(3, 1, 1)
-        plt.plot(self.times, sigma_vx, '+')
-        plt.grid(True)
-        plt.title('СКО $V_x$')
-        plt.xlabel('Время')
-        plt.ylabel('$\sigma_{V_x}$')
+        ax2.plot(self.times, sigma_vy, '+', label = 'СКО $V_y$')
+        ax2.set_ylabel('$\sigma_{V_y}$')
+        ax2.grid(True)
 
-        plt.subplot(3, 1, 2)
-        plt.plot(self.times, sigma_vy, '+')
-        plt.grid(True)
-        plt.title('СКО $V_y$')
-        plt.xlabel('Время')
-        plt.ylabel('$\sigma_{V_y}$')
-
-        plt.subplot(3, 1, 3)
-        plt.plot(self.times, sigma_vz, '+')
-        plt.grid(True)
-        plt.title('СКО $V_z$')
-        plt.xlabel('Время')
-        plt.ylabel('$\sigma_{V_z}$')
+        ax3.plot(self.times, sigma_vz, '+', label = 'СКО $V_z$')
+        ax3.set_ylabel('$\sigma_{V_z}$')
+        ax3.set_xlabel('Время')
+        ax3.grid(True)
 
         plt.tight_layout()
         plt.show()
@@ -405,7 +390,7 @@ class UKF:
 
 class SquareRootUKF:
     """ Класс, реализующий сигматочечный фильтр Калмана.
-        Фильтрация вектора состояния и его ковариационной 
+        Фильтрация вектора состояния и корня ковариационной 
         матрицы по массиву измерений, взятых из ContextOD.
     """
     #: Ковариационнная матрица вектора состояния 
@@ -457,7 +442,7 @@ class SquareRootUKF:
     #: Список скорректированных векторов состояния
     forward_states: List = []
 
-    #: Список скорректированных ковариационннных матриц
+    #: Список скорректированных ковариационных матриц
     forward_covs: List = []
 
     #: Cписок моментов времени, в которые фильтруем данные
@@ -510,7 +495,7 @@ class SquareRootUKF:
             self.kappa = kappa
 
             self.dim_x = dim_x
-            self.par_lambda = alpha**2 * (self.dim_x + kappa) - self.dim_x
+            self.par_lambda = alpha**2 * (dim_x + kappa) - dim_x
             self.SR_cov = cholesky(P)
 
             self.set_weights()
@@ -533,10 +518,16 @@ class SquareRootUKF:
         self.w_mean[0] = self.par_lambda / (self.dim_x + self.par_lambda)
         self.w_cov[0] = self.w_mean[0] + (1 - self.alpha**2 + self.beta)
 
-    def cholupdate(self, R, u, v):       
+    def cholupdate(self, R, u, v):
         n = R.shape[0]
         R_new = R.copy().astype(float)
         x = u.copy().astype(float)
+
+        x_norm = np.linalg.norm(x)
+        if x_norm > 1e6:
+            scale_factor = 1e6 / x_norm
+            x *= scale_factor 
+            #print(f'WARNING: Normalizing large vector in cholupdate, norm was {x_norm}')
 
         if v > 0:
             alpha = np.sqrt(v)
@@ -544,12 +535,22 @@ class SquareRootUKF:
             
             for k in range(n):
                 r_old = R_new[k, k]
+                if abs(r_old) < 1e-12:
+                    r_old = 1e-12
+
                 r_old_sq = r_old * r_old
                 x_k_sq = x[k] * x[k]
-                r_new = np.sqrt(r_old_sq + x_k_sq)
+
+                denominator = r_old_sq + x_k_sq
+                threshold = 1e-12 * max(1, r_old_sq)
+                if denominator <= threshold:
+                    r_new = np.sqrt(threshold)
+                else:
+                    r_new = np.sqrt(denominator)
+
                 c = r_new / r_old
                 s = x[k] / r_old
-                R_new[k, k] = r_new    
+                R_new[k, k] = r_new
                 if k < n - 1:
                     for j in range(k + 1, n):
                         old_val = R_new[k, j]
@@ -562,36 +563,77 @@ class SquareRootUKF:
         else:
             alpha = np.sqrt(-v)
             x = alpha * x
-                    
+            
             for k in range(n):
                 r_old = R_new[k, k]
-                r_old_sq = r_old * r_old
-                x_k_sq = x[k] * x[k]
-                if r_old_sq - x_k_sq < 1e-24:
-                    r_new = 3e-3
-                else:
-                    r_new = np.sqrt(r_old_sq - x_k_sq)
+                x_k = x[k]
                 
-                c = r_new / r_old
-                s = x[k] / r_old
+                r_new_sq = r_old * r_old - x_k * x_k
+                threshold = max(1e-12, 1e-8 * r_old * r_old)
+                if r_new_sq <= threshold:
+                    r_new = np.sqrt(threshold)
+                    c = r_new / r_old
+                    s = 0.0
+                    #print(f'Внимание: консервативное обновление Холецкого из-за r_new_sq: {r_new_sq:.2e}')
+                else:
+                    r_new = np.sqrt(r_new_sq)
+                    c = r_new / r_old if abs(r_old) > 1e-12 else 1.0
+                    s = x_k / r_old if abs(r_old) > 1e-12 else 0.0
+                
                 R_new[k, k] = r_new
-                if k < n - 1:
-                    for j in range(k + 1, n):
-                        R_new[k, j] = (R_new[k, j] - s * x[j]) / c
-                        x[j] = c * x[j] - s * R_new[k, j]
+                
+                for j in range(k + 1, n):
+                    R_new[k, j] = (R_new[k, j] - s * x[j]) / c
+                    x[j] = c * x[j] - s * R_new[k, j]
 
         return R_new
-             
+
+    def cholupdate_safe(self, R, u, v):
+        """Безопасная версия через пересчет Холецкого"""
+        try:
+            return self.cholupdate(R, u, v)
+        except (np.linalg.LinAlgError, ValueError, RuntimeWarning) as e:
+            #print(f'Обычное обновление Холецкого не удалось: {e}')
+            pass
+
+        u_norm = np.linalg.norm(u)
+        R_norm = np.linalg.norm(R)
+        if u_norm > 1e6:
+            #print(f'КРИТИЧНО: слишком большая норма ветора u, norm: {u_norm:.2e}')
+            return R + np.eye(R.shape[0]) * 1e-10
+        
+        try:
+            if v > 0:
+                P_plus = R.T @ R + v * np.outer(u, u)
+            else:
+                P_plus = R.T @ R - abs(v) * np.outer(u, u)
+
+            min_eig = np.min(np.linalg.eigvalsh(P_plus))
+            if min_eig < -1e-6:
+                #print(f'КРИТИЧНО: строго отрицательное собств. значение: {min_eig:.2e}')
+                reg = abs(min_eig) + 1e-6
+            else:
+                reg = max(0, -min_eig) + 1e-12
+            
+            P_reg = P_plus + np.eye(P_plus.shape[0]) * reg
+            result = scipy.linalg.cholesky(P_reg, lower=False)
+            #print(f'Автоматическая регуляризация: {reg:.2e}')
+            return result
+        
+        except np.linalg.LinAlgError as e:
+            #print(f'КРИТИЧНО: Безопасное обновление Холецкого не удалось: {e}, возвращаем R с шумом')
+            return R + np.eye(R.shape[0]) * 1e-10
+        
     def generate_sigma_points(self) -> np.ndarray:
         """ Создает массив сигма точек вектора состояния,
             образующий окрестность."""
         sigma_points = np.zeros((2 * self.dim_x + 1, self.dim_x))
         sigma_points[0] = self.state_v
 
-        eta = self.alpha * np.sqrt(self.dim_x)
+        sqrt_matrix = np.sqrt(self.dim_x + self.par_lambda) * self.SR_cov
         for i in range(self.dim_x):
-            sigma_points[i+1] = self.state_v + eta * self.SR_cov[i, :]
-            sigma_points[i+1+self.dim_x] = self.state_v - eta * self.SR_cov[i, :]
+            sigma_points[i+1] = self.state_v + sqrt_matrix[i, :]
+            sigma_points[i+1+self.dim_x] = self.state_v - sqrt_matrix[i, :]
         return sigma_points
    
     def prediction(self, t_k: pd.Timestamp) -> tuple[np.ndarray, np.ndarray]:
@@ -609,20 +651,20 @@ class SquareRootUKF:
 
         # 3. Предсказываем среднее и ковариационную матрицу.
         pred_state = self.w_mean @ self.transform_points
-        print(f'pred_state = {pred_state}')
+
         QR_matrix = np.zeros((self.dim_x, 2 * self.dim_x))
         for i in range (2 * self.dim_x):
-            QR_matrix[:, i] = sqrt(self.w_cov[1]) * (self.transform_points[i+1] - pred_state)
+            QR_matrix[:, i] = sqrt(self.w_cov[1]) * (self.transform_points[i+1, :] - pred_state)
         QR_matrix = np.hstack([QR_matrix, scipy.linalg.sqrtm(self.cov_process_matrix)])
         _, R = np.linalg.qr(QR_matrix.T)
         R = R[:self.dim_x, :self.dim_x]
 
         SR_predict = self.cholupdate(R, self.transform_points[0] - pred_state, self.w_cov[0])
-        pred_cov = SR_predict @ SR_predict.T
+        pred_cov = SR_predict.T @ SR_predict
 
         self.write_pred_data(pred_state, pred_cov)
         self.times.append(t_k)
-
+        
         return pred_state, pred_cov, SR_predict, traj
 
     def correction(self, z: pd.DataFrame, pred_state: np.ndarray, pred_cov: np.ndarray,
@@ -640,47 +682,73 @@ class SquareRootUKF:
         #    пакета pyorbs:
         traj.measure = z
         res_meas = traj.set_residuals()[:, :, 0]
-        calc_measure = a_priori_meas - res_meas
-        print(res_meas)
+        calc_measure = a_priori_meas - res_meas        
+        #print(res_meas)
         # 5. Вычисляем предсказанное среднее и предсказанную
         #    ковариационную матрицу:
         pred_meas = self.w_mean @ calc_measure
 
         QR_matrix = np.zeros((2, 2 * self.dim_x))
         for i in range (2 * self.dim_x):
-            QR_matrix[:, i] = sqrt(self.w_cov[1]) * (calc_measure[i+1] - pred_meas)
+            QR_matrix[:, i] = sqrt(self.w_cov[1]) * (calc_measure[i+1, :] - pred_meas)
         QR_matrix = np.hstack([QR_matrix, scipy.linalg.sqrtm(self.cov_matrix_measure)])
         _, R = np.linalg.qr(QR_matrix.T)
         R = R[:2, :2]
         S = self.cholupdate(R, calc_measure[0] - pred_meas, self.w_cov[0])
 
         # 6. Вычисляем перекрестную ковариацию:
-        Pyz = (self.w_cov[:, None, None] * (
-                (self.sigma_points - pred_state)[:, :, None] @
-                (calc_measure - pred_meas)[:, None, :]
-                )).sum(axis = 0)
+        diff_state = self.sigma_points - pred_state
+        diff_meas = calc_measure - pred_meas
+        Pyz = np.zeros((self.dim_x, 2))
+
+        for i in range(2 * self.dim_x + 1):
+            Pyz += self.w_cov[i] * np.outer(diff_state[i], diff_meas[i])
 
         # 7. Вычисляем матрицу усиления:
         try:
             temp = scipy.linalg.solve_triangular(S, Pyz.T, lower=False)
             Kalman_gain = scipy.linalg.solve_triangular(S.T, temp, lower=True).T
         except np.linalg.LinAlgError:
-            Kalman_gain = Pyz @ np.linalg.pinv(S @ S.T)
+            Kalman_gain = Pyz @ np.linalg.pinv(S.T @ S)
 
         # 8. Вычисляем невязку по измерениям:
         res_z = a_priori_meas - pred_meas
 
         # 9. Корректируем вектор состояния и ковариационную матрицу
-        self.state_v = pred_state + Kalman_gain @ res_z.T
+        self.state_v = pred_state + Kalman_gain @ res_z
         U = Kalman_gain @ S
 
+        #print(f"Kalman gain norm: {np.linalg.norm(Kalman_gain)}")
+        #print(f"U norm: {np.linalg.norm(U)}")
+
+        U_norm = np.linalg.norm(U)
+        if U_norm > 0.1:
+            scale = 0.1 / U_norm if U_norm > 1.0 else 1.0
+            U *= scale
+            #if scale < 1.0:
+                #print(f'Плавное масштабирование U, норма: {U_norm:.6e} -> {np.linalg.norm(U):.6e}, коэффициент: {scale:.6f}')
+
         SR_temp = SR_predict.copy()
+        update_failures = 0
         for i in range(U.shape[1]):
-            u_col = U[:, i]        
-            SR_temp = self.cholupdate(SR_temp, u_col, -1.0)
+            u_col = U[:, i]
+            try:
+                SR_temp = self.cholupdate_safe(SR_temp, u_col, -1.0)
+            except:
+                update_failures += 1
+                #print(f'Обновление не удалось для столбца {i}')
+        
+        #if update_failures > 0:
+            #print(f'Общее количество неудавшихся обновлений = {update_failures}/{U.shape[1]}')
 
         self.SR_cov = SR_temp
-        self.cov_matrix = self.SR_cov @ self.SR_cov.T
+        cov_norm = np.linalg.norm(self.SR_cov)
+        if cov_norm > 1e6 or np.any(np.isnan(self.SR_cov)):
+            #print(f"КРИТИЧНО: ковариация расходится, норма: {cov_norm:.6e}")
+            self.SR_cov = scipy.linalg.cholesky(self.cov_matrix, lower=False)
+            #print("Ковариационная матрица сбросилась к начальному значению")
+
+        self.cov_matrix = self.SR_cov.T @ self.SR_cov
 
         self.forward_states.append(self.state_v)
         self.forward_covs.append(self.cov_matrix)
@@ -735,55 +803,40 @@ class SquareRootUKF:
         sigma_vy = [sqrt(arr[4,4]) for arr in smoothed_covs]
         sigma_vz = [sqrt(arr[5,5]) for arr in smoothed_covs]
         
-        plt.figure('Положение', figsize=(19,10))
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, sharex = True, figsize=(19,10))
+        fig.suptitle('Положение', fontsize = 16)
 
-        plt.subplot(3, 1, 1)
-        plt.plot(self.times, sigma_x, '+')
-        plt.grid(True)
-        plt.title('СКО х')
-        plt.xlabel('Время')
-        plt.ylabel('$\sigma_x$')
+        ax1.plot(self.times, sigma_x, '+', label = 'СКО х')
+        ax1.set_ylabel('$\sigma_x$')
+        ax1.grid(True)
 
-        plt.subplot(3, 1, 2)
-        plt.plot(self.times, sigma_y, '+')
-        plt.grid(True)
-        plt.title('СКО y')
-        plt.xlabel('Время')
-        plt.ylabel('$\sigma_y$')
+        ax2.plot(self.times, sigma_y, '+', label = 'СКО y')
+        ax2.set_ylabel('$\sigma_y$')
+        ax2.grid(True)
 
-        plt.subplot(3, 1, 3)
-        plt.plot(self.times, sigma_z, '+')
-        plt.grid(True)
-        plt.title('СКО z')
-        plt.xlabel('Время')
-        plt.ylabel('$\sigma_z$')
+        ax3.plot(self.times, sigma_z, '+', label = 'СКО z')
+        ax3.set_ylabel('$\sigma_z$')
+        ax3.set_xlabel('Время')
+        ax3.grid(True)
 
         plt.tight_layout()
         plt.show()
 
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, sharex = True, figsize=(19,10))
+        fig.suptitle('Скорость', fontsize = 16)
 
-        plt.figure('Скорость', figsize=(19,10))
+        ax1.plot(self.times, sigma_vx, '+', label = 'СКО $V_x$')
+        ax1.set_ylabel('$\sigma_{V_x}$')
+        ax1.grid(True)
 
-        plt.subplot(3, 1, 1)
-        plt.plot(self.times, sigma_vx, '+')
-        plt.grid(True)
-        plt.title('СКО $V_x$')
-        plt.xlabel('Время')
-        plt.ylabel('$\sigma_{V_x}$')
+        ax2.plot(self.times, sigma_vy, '+', label = 'СКО $V_y$')
+        ax2.set_ylabel('$\sigma_{V_y}$')
+        ax2.grid(True)
 
-        plt.subplot(3, 1, 2)
-        plt.plot(self.times, sigma_vy, '+')
-        plt.grid(True)
-        plt.title('СКО $V_y$')
-        plt.xlabel('Время')
-        plt.ylabel('$\sigma_{V_y}$')
-
-        plt.subplot(3, 1, 3)
-        plt.plot(self.times, sigma_vz, '+')
-        plt.grid(True)
-        plt.title('СКО $V_z$')
-        plt.xlabel('Время')
-        plt.ylabel('$\sigma_{V_z}$')
+        ax3.plot(self.times, sigma_vz, '+', label = 'СКО $V_z$')
+        ax3.set_ylabel('$\sigma_{V_z}$')
+        ax3.set_xlabel('Время')
+        ax3.grid(True)
 
         plt.tight_layout()
         plt.show()
