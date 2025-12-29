@@ -11,8 +11,8 @@ from pyorbs.vis import plot_res
 
 def get_initial_params():
     sq = select(OrbitSolution).where(
-        OrbitSolution.obj_id == 4297,
-        cast(OrbitSolution.epoch, DateTime).between(datetime(2025,3,8), datetime(2025,3,10))  
+        OrbitSolution.obj_id == 41105,
+        cast(OrbitSolution.epoch, DateTime).between(datetime(2025, 7, 1), datetime(2025, 7, 10))  
     ).order_by(OrbitSolution.time_obtained.desc()).limit(1)
         
     with SessionOrbits() as session:
@@ -20,7 +20,7 @@ def get_initial_params():
 
     obj = res.obj_id
     b_initial = np.array(res.state)
-    P_initial = np.array(res.cov).reshape(6,6) #np.array(res.cov).reshape(7,7)[:6,:6]  
+    P_initial = np.array(res.cov).reshape(6,6) #np.array(res.cov).reshape(7,7)[:6,:6]
     epoch = res.epoch
     return obj, b_initial, P_initial, epoch
 
@@ -30,24 +30,25 @@ def check_residuals(state, meas):
     plot_res(step.meas_tab)
 
 def main():
-    obj, x0, P0, t_start = get_initial_params()
-    t_end = t_start + timedelta(days = 60)
-    ctx = ContextOD(obj_id = obj, initial_orbit = x0, 
-                    t_start = t_start, t_stop = t_end) 
-    meas = ctx.meas_data
-    #x0 += np.array([1e-3, 1e-3, 1e-3, 1e-5, 1e-5, 1e-5])
-    filter = SquareRootUKF(t_start = t_start, P = P0,
-                           x = orbit(x = x0, time = t_start).state_v)
-    
+    obj, x0, P0, t0 = get_initial_params()
+    t = t0 + timedelta(days = 10)
+
+    ctx = ContextOD(obj_id = obj, initial_orbit = x0, t_start = t0, t_stop = t)
+    meas = ctx.meas_data.sort_values('time')
+
+    filter = SquareRootUKF(t_start = t0, P = P0, 
+                                x = orbit(x = x0, time = t0).state_v)
     for _, m in meas.iterrows():
-        t = m['time'].to_pydatetime()
-        filter.step(m, t)
-        #print(filter.state_v)
-        print(f'Уточнились на {t}')
+        t_k = m['time'].to_pydatetime()
+        filter.step(m, t_k)
+        print(f'Уточнились на {t_k}')
     
     smoothing_states, smoothing_covs = filter.rts_smoother()
-    filter.draw_plots(smoothing_states, smoothing_covs)
+    filter.draw_position_std(smoothing_covs)
     check_residuals(smoothing_states[-1], meas)
+
+    state = orbit(x = x0, time = t0)
+    ctx.single_od(state )
 
 if __name__ == "__main__":
     main()
