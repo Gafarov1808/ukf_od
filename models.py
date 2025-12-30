@@ -12,8 +12,7 @@ import _config
 _SEC2RAD = np.pi / 180. / 3600.
 
 class Trajectories:
-    """ 
-    Класс, протягивающий траекторию по измерениям для каждой сигма точки.
+    """ Класс, протягивающий траекторию по измерениям для каждой сигма точки.
     """
     
     #: Количество сигма точек
@@ -646,8 +645,7 @@ class SquareRootUKF:
     def correction(self, z: pd.DataFrame, pred_state: np.ndarray,
                     SR_predict: np.ndarray, t_k: pd.Timestamp,
                         traj: Trajectories) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Этап коррекции оценки вектора состояния и корня ковариационной матрицы.
+        """ Этап коррекции оценки вектора состояния и корня ковариационной матрицы.
 
         Args:
             z: таблица с измерениями из класса ContextOD.
@@ -666,22 +664,22 @@ class SquareRootUKF:
         #    pyorbs и класса Trajectories:
         traj.measure = z
         res_meas = traj.set_residuals()
-        calc_measure = a_priori_meas - res_meas
+        calc_meas = a_priori_meas - res_meas
 
         # 5. Вычисляем предсказанную оценку по измерениям и предсказанный
         #    корень ковариационной матрицы с помощью алгоритма cholupdate:
-        pred_meas = self.w_mean @ calc_measure
+        pred_meas = self.w_mean @ calc_meas
 
         QR_matrix = np.zeros((2, 2 * self.dim_x))
         for i in range (2 * self.dim_x):
-            QR_matrix[:, i] = sqrt(self.w_cov[1]) * (calc_measure[i+1] - pred_meas)
+            QR_matrix[:, i] = sqrt(self.w_cov[1]) * (calc_meas[i+1] - pred_meas)
         QR_matrix = np.hstack([QR_matrix, scipy.linalg.sqrtm(self.cov_matrix_measure)])
         _, R = np.linalg.qr(QR_matrix.T)
-        S = self.cholupdate(R.T, calc_measure[0] - pred_meas, self.w_cov[0])
+        S = self.cholupdate(R.T, calc_meas[0] - pred_meas, self.w_cov[0])
 
         # 6. Вычисляем перекрестную ковариацию:
         diff_state = self.transform_points - pred_state
-        diff_meas = calc_measure - pred_meas
+        diff_meas = calc_meas - pred_meas
         Pyz = np.zeros((self.dim_x, 2))
 
         for i in range(2 * self.dim_x + 1):
@@ -689,8 +687,7 @@ class SquareRootUKF:
 
         # 7. Вычисляем матрицу усиления:
         try:
-            temp = scipy.linalg.solve_triangular(S, Pyz.T, lower=False)
-            Kalman_gain = scipy.linalg.solve_triangular(S.T, temp, lower=True).T
+            Kalman_gain = Pyz @ np.linalg.inv(S.T) @ np.linalg.inv(S)
         except np.linalg.LinAlgError:
             Kalman_gain = Pyz @ np.linalg.pinv(S.T @ S)
 
@@ -705,7 +702,6 @@ class SquareRootUKF:
             for i in range(U.shape[1]):
                 S_new = self.cholupdate(S_new, U[:, i], -1.0)
             self.SR_cov = S_new
-
         except ValueError as e:
             print(e)
             self.t_start = t_k
