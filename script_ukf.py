@@ -1,13 +1,14 @@
 import numpy as np
 from datetime import timedelta, datetime
 from sqlalchemy import select, cast, DateTime
-from models import SquareRootUKF
+from models import UKF, SquareRootUKF
 
 from kiamdb.orbits import OrbitSolution, SessionOrbits
 from kiamdb.od import ContextOD
 from pyorbs.pyorbs import orbit
 from pyorbs.pyorbs_det import od_step
 from pyorbs.vis import plot_res
+import _config
 
 def get_initial_params(obj, t_start):
     sq = select(OrbitSolution).where(
@@ -31,23 +32,39 @@ def check_residuals(state, meas):
     plot_res(step.meas_tab)
 
 def main():
-    obj = 43088
+    obj = 43109
     t_start = datetime(2025, 12, 1)
     t = t_start + timedelta(days = 30)
 
     x0, P0, t0 = get_initial_params(obj, t_start)
-    x0 += np.array([2, 2, 1, 0.1, 0.1, 0.1])
     ctx = ContextOD(obj_id = obj, initial_orbit = x0, t_start = t_start, t_stop = t)
     #ctx.single_od()
     #plot_res(ctx.current_step.meas_tab)
     meas = ctx.meas_data.sort_values('time')
-
+    x0 += np.array([0.01, 0.00, 0.0, 0.0, 0.0, 0.0])
     filter = SquareRootUKF(t_start = t0, x = orbit(x = x0, time = t0).state_v, P = P0)
+    """for i in range(len(meas) // _config.LEN_BLOCK_MEAS):
+        block_meas = meas[i * _config.LEN_BLOCK_MEAS : (i+1) * _config.LEN_BLOCK_MEAS]
+        filter.new_filter_step(block_meas)"""
+    times = [meas.iloc[i]['time'].to_pydatetime() for i in range (len(meas)-1)]
+    k = 0
     for _, m in meas.iterrows():
         t_k = m['time'].to_pydatetime()
-        filter.step(m, t_k)
+        if (t_k - times[k-1]) > timedelta(hours = 12):
+            print(filter.state_v, times[k-1], t_k)
+            orb = orbit(x = filter.state_v, time = times[k-1])
+            orb.setup_parameters()
+            orb.move(t_k)
+            filter.state_v = orb.state_v
+            filter.t_start = t_k
+            #filter.step(m, t_k)
+        else:
+            filter.step(m, t_k)
+        print(filter.state_v)
+        k+=1
         print(f'Коррекция: {t_k}')
-    
+        print('------------------------------------------------')
+
     #smoothing_states, smoothing_covs = filter.rts_smoother()
     check_residuals(filter.state_v, meas)
     filter.draw_position_std()
