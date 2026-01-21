@@ -1,19 +1,20 @@
 import numpy as np
 from datetime import timedelta, datetime
 from sqlalchemy import select, cast, DateTime
-from models import SquareRootUKF
+from models import UKF, SquareRootUKF
 
 from kiamdb.orbits import OrbitSolution, SessionOrbits
 from kiamdb.od import ContextOD
 from pyorbs.pyorbs import orbit
 from pyorbs.pyorbs_det import od_step
 from pyorbs.vis import plot_res
+import _config
 
-def get_initial_params():
+def get_initial_params(obj, t_start):
     sq = select(OrbitSolution).where(
-        OrbitSolution.obj_id == 43109,
-        cast(OrbitSolution.epoch, DateTime).between(datetime(2025, 12, 1), datetime(2025, 12, 30))
-        ).order_by(OrbitSolution.time_obtained.desc()).limit(1)
+        OrbitSolution.obj_id == obj,
+        cast(OrbitSolution.epoch, DateTime).between(t_start, t_start + timedelta(days = 15))
+        ).order_by(OrbitSolution.time_obtained.asc()).limit(1)
         
     with SessionOrbits() as session:
         res = session.scalar(sq)
@@ -23,7 +24,7 @@ def get_initial_params():
     else:
         P_initial = np.array(res.cov).reshape(6,6)
 
-    return res.obj_id, np.array(res.state), P_initial, res.epoch
+    return np.array(res.state), P_initial, res.epoch
 
 def check_residuals(state, meas):
     orb = orbit(x = state, time = meas.iloc[-1]['time'].to_pydatetime())
@@ -31,23 +32,42 @@ def check_residuals(state, meas):
     plot_res(step.meas_tab)
 
 def main():
-    obj, x0, P0, t0 = get_initial_params()
+    obj = 43109
     t_start = datetime(2025, 12, 1)
     t = t_start + timedelta(days = 30)
+
+    x0, P0, t0 = get_initial_params(obj, t_start)
     ctx = ContextOD(obj_id = obj, initial_orbit = x0, t_start = t_start, t_stop = t)
     #ctx.single_od()
     #plot_res(ctx.current_step.meas_tab)
     meas = ctx.meas_data.sort_values('time')
-
-    filter = SquareRootUKF(t_start = t0, P = P0, x = orbit(x = x0, time = t0).state_v)
+    x0 += np.array([0.01, 0.00, 0.0, 0.0, 0.0, 0.0])
+    filter = SquareRootUKF(t_start = t0, x = orbit(x = x0, time = t0).state_v, P = P0)
+    """for i in range(len(meas) // _config.LEN_BLOCK_MEAS):
+        block_meas = meas[i * _config.LEN_BLOCK_MEAS : (i+1) * _config.LEN_BLOCK_MEAS]
+        filter.new_filter_step(block_meas)"""
+    times = [meas.iloc[i]['time'].to_pydatetime() for i in range (len(meas)-1)]
+    k = 0
     for _, m in meas.iterrows():
         t_k = m['time'].to_pydatetime()
-        filter.step(m, t_k)
-        print(f'Уточнились на {t_k}')
-    
-    smoothing_states, smoothing_covs = filter.rts_smoother()
-    filter.draw_position_std(smoothing_covs)
-    check_residuals(smoothing_states[-1], meas)
+        if (t_k - times[k-1]) > timedelta(hours = 12):
+            print(filter.state_v, times[k-1], t_k)
+            orb = orbit(x = filter.state_v, time = times[k-1])
+            orb.setup_parameters()
+            orb.move(t_k)
+            filter.state_v = orb.state_v
+            filter.t_start = t_k
+            #filter.step(m, t_k)
+        else:
+            filter.step(m, t_k)
+        print(filter.state_v)
+        k+=1
+        print(f'Коррекция: {t_k}')
+        print('------------------------------------------------')
+
+    #smoothing_states, smoothing_covs = filter.rts_smoother()
+    check_residuals(filter.state_v, meas)
+    filter.draw_position_std()
 
 if __name__ == "__main__":
     main()
