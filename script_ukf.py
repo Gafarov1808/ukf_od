@@ -46,27 +46,14 @@ def main():
     """for i in range(len(meas) // _config.LEN_BLOCK_MEAS):
         block_meas = meas[i * _config.LEN_BLOCK_MEAS : (i+1) * _config.LEN_BLOCK_MEAS]
         filter.new_filter_step(block_meas)"""
-    times = [meas.iloc[i]['time'].to_pydatetime() for i in range (len(meas)-1)]
-    k = 0
+
     for _, m in meas.iterrows():
         t_k = m['time'].to_pydatetime()
-        if (t_k - times[k-1]) > timedelta(hours = 12):
-            print(filter.state_v, times[k-1], t_k)
-            orb = orbit(x = filter.state_v, time = times[k-1])
-            orb.setup_parameters()
-            orb.move(t_k)
-            filter.state_v = orb.state_v
-            filter.t_start = t_k
-            #filter.step(m, t_k)
-        else:
-            filter.step(m, t_k)
-        print(filter.state_v)
-        k+=1
+        filter.step(m, t_k)
         print(f'Коррекция: {t_k}')
-        print('------------------------------------------------')
 
     #smoothing_states, smoothing_covs = filter.rts_smoother()
-    check_residuals(filter.state_v, meas)
+    #check_residuals(filter.state_v, meas)
     filter.draw_position_std()
 
 if __name__ == "__main__":

@@ -58,7 +58,7 @@ class Trajectories:
         self.sigma_points = sigma_points
         self.measure = measure
         self.t_start = t_start
-        self.t_end = t_k
+        self.t_k = t_k
         self.orb_list = []
         self.transform_points = transform_points
 
@@ -71,7 +71,7 @@ class Trajectories:
         for i in range (self.N):
             orb = pyorbs.pyorbs.orbit(x = self.sigma_points[i], time = self.t_start)
             orb.setup_parameters()
-            orb.move(self.t_end)
+            orb.move(self.t_k)
             self.transform_points[i] = orb.state_v
             self.orb_list.append(orb)
 
@@ -97,6 +97,7 @@ class UKF:
         Фильтрация вектора состояния и его ковариационной 
         матрицы по массиву измерений, взятых из ContextOD.
     """
+    
     #: Ковариационнная матрица вектора состояния 
     cov_matrix: np.ndarray
 
@@ -376,6 +377,7 @@ class SquareRootUKF:
         Фильтрация вектора состояния и корня ковариационной 
         матрицы по массиву измерений, взятых из ContextOD.
     """
+    
     #: Ковариационнная матрица вектора состояния 
     cov_matrix: np.ndarray
 
@@ -648,13 +650,14 @@ class SquareRootUKF:
         """
 
         a_priori_meas = np.array(z['val'])
-
+        #print(f'mean orb = {self.sigma_points[0]}')
+        #print(f'trans mean orb = {self.transform_points[0]}, t_k = {traj.t_k}')
         # 4. Возвращаем невязки по измерениям с помощью пакета
         #    pyorbs и класса Trajectories:
         traj.measure = z
         res_meas = traj.set_residuals()
         calc_meas = a_priori_meas - res_meas
-
+        print(res_meas / _SEC2RAD)
         # 5. Вычисляем предсказанную оценку по измерениям и предсказанный
         #    корень ковариационной матрицы с помощью алгоритма cholupdate:
         pred_meas = self.w_mean @ calc_meas
@@ -665,7 +668,7 @@ class SquareRootUKF:
         QR_matrix = np.hstack([QR_matrix, scipy.linalg.sqrtm(self.cov_matrix_measure)])
         _, R = np.linalg.qr(QR_matrix.T)
         S = self.cholupdate(R.T, calc_meas[0] - pred_meas, self.w_cov[0])
-        
+
         # 6. Вычисляем перекрестную ковариацию:
         diff_state = traj.transform_points - pred_state
         diff_meas = calc_meas - pred_meas
@@ -682,7 +685,6 @@ class SquareRootUKF:
 
         # 8. Вычисляем невязку по измерениям:
         res_z = a_priori_meas - pred_meas
-        print(res_z / _SEC2RAD)
 
         # 9. Корректируем вектор состояния и корень ковариационной матрицы.
         #    В случае неудачи обновления Холецкого для корня завершаем
@@ -695,12 +697,13 @@ class SquareRootUKF:
             self.SR_cov = S_new
 
         except ValueError as e:
+            self.move(t_k)
             print(e)
             return
 
         self.state_v = pred_state + Kalman_gain @ res_z
         self.cov_matrix = self.SR_cov @ self.SR_cov.T
-        
+        #print(f'after corr orb = {self.state_v}')
         """if len_block == _config.LEN_BLOCK_MEAS - 1:
             self.state_v = pred_state + Kalman_gain @ res_z
         else:
@@ -727,6 +730,15 @@ class SquareRootUKF:
         pred_state, SR_predict, traj = self.prediction(t_k)
         self.correction(z, pred_state, SR_predict, t_k, traj)
 
+    def move(self, t_k):
+        """Вызываем метод в случае падения обновления Холецкого для корня 
+        ковариационной матрицы на этапе коррекции."""
+        orb = pyorbs.pyorbs.orbit(x = self.state_v, time = self.t_start)
+        orb.setup_parameters()
+        orb.move(t_k)
+        self.state_v = orb.state_v
+        self.t_start = t_k
+        
     '''def new_filter_step(self, block_meas: pd.DataFrame):
         """ Новый шаг фильтрации. Накапливает несколько измерений.
         Args:
