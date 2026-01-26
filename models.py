@@ -1,4 +1,5 @@
 import numpy as np
+import multiprocessing as mp
 import scipy
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -18,7 +19,7 @@ class Trajectories:
     #: Количество сигма точек
     amount_points: int
 
-    #: Набор сигма точек
+    #: Набор сигма точек в момент времени t_start
     sigma_points: np.ndarray
 
     #: Набор измерений
@@ -27,13 +28,13 @@ class Trajectories:
     #: Момент времени, от которого протягиваем орбиту
     t_start: pyorbs.pyorbs.ephem_time
 
-    #: Время, до которого протягиваем орбиту
+    #: Момент времени, до которого тянем орбиту
     t_k: pyorbs.pyorbs.ephem_time | pd.Timestamp
 
-    #: Список орбит сигма точек
+    #: Список орбит протянутых сигма точек до момента времени t_k
     orb_list: list[pyorbs.pyorbs.orbit]
 
-    #: Список протянутых сигма точек
+    #: Список протянутых сигма точек в момент времени t_k
     transform_points: np.ndarray = np.zeros((13,6))
     
     def __init__(
@@ -43,7 +44,7 @@ class Trajectories:
             t_start: pyorbs.pyorbs.ephem_time,
             t_k: pyorbs.pyorbs.ephem_time | pd.Timestamp,
             measure: pd.DataFrame | pd.Series | None, 
-            transform_points: np.ndarray = np.ndarray((13, (13-1) // 2))
+            transform_points: np.ndarray = np.ndarray((13, 6))
         ) -> None:
         """
         Args:
@@ -63,17 +64,28 @@ class Trajectories:
         self.transform_points = transform_points
 
 
+    @staticmethod
+    def move_point(args):
+        orb, t_k = args
+        orb.move(t_k)
+        return orb
+
     def get_transform_sigma_points(self):
         """ Протягивает облако сигма точек в заданный момент времени.
         """
-        #transform_points = np.zeros((self.N, (self.N-1) // 2))
 
         for i in range (self.N):
             orb = pyorbs.pyorbs.orbit(x = self.sigma_points[i], time = self.t_start)
-            orb.setup_parameters()
-            orb.move(self.t_k)
-            self.transform_points[i] = orb.state_v
+            #orb.setup_parameters()
+            #orb.move(self.t_k)
+            #self.transform_points[i] = orb.state_v
             self.orb_list.append(orb)
+
+        data_orbs = [(orb, self.t_k) for orb in self.orb_list]
+        with mp.Pool(min(self.N, mp.cpu_count())) as p:
+            self.orb_list = p.map(self.move_point, data_orbs)
+        
+        self.transform_points = np.array([orb.state_v for orb in self.orb_list])
 
     def set_residuals(self) -> np.ndarray | None:
         """ Выдает невязки по измерениям для всех сигма точек
@@ -650,14 +662,13 @@ class SquareRootUKF:
         """
 
         a_priori_meas = np.array(z['val'])
-        #print(f'mean orb = {self.sigma_points[0]}')
-        #print(f'trans mean orb = {self.transform_points[0]}, t_k = {traj.t_k}')
+
         # 4. Возвращаем невязки по измерениям с помощью пакета
         #    pyorbs и класса Trajectories:
         traj.measure = z
         res_meas = traj.set_residuals()
         calc_meas = a_priori_meas - res_meas
-        print(res_meas / _SEC2RAD)
+
         # 5. Вычисляем предсказанную оценку по измерениям и предсказанный
         #    корень ковариационной матрицы с помощью алгоритма cholupdate:
         pred_meas = self.w_mean @ calc_meas

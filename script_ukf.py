@@ -50,6 +50,7 @@ def main():
     for _, m in meas.iterrows():
         t_k = m['time'].to_pydatetime()
         filter.step(m, t_k)
+        print(filter.state_v)
         print(f'Коррекция: {t_k}')
 
     #smoothing_states, smoothing_covs = filter.rts_smoother()
