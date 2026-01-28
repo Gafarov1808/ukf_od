@@ -12,6 +12,7 @@ import _config
 
 _SEC2RAD = np.pi / 180. / 3600.
 
+
 class Trajectories:
     """ Класс, протягивающий траекторию по измерениям для каждой сигма точки.
     """
@@ -29,7 +30,7 @@ class Trajectories:
     t_start: pyorbs.pyorbs.ephem_time
 
     #: Момент времени, до которого тянем орбиту
-    t_k: pyorbs.pyorbs.ephem_time | pd.Timestamp
+    t_k: pyorbs.pyorbs.ephem_time
 
     #: Список орбит протянутых сигма точек до момента времени t_k
     orb_list: list[pyorbs.pyorbs.orbit]
@@ -42,7 +43,7 @@ class Trajectories:
             amount_points: int,
             sigma_points: np.ndarray,
             t_start: pyorbs.pyorbs.ephem_time,
-            t_k: pyorbs.pyorbs.ephem_time | pd.Timestamp,
+            t_k: pyorbs.pyorbs.ephem_time,
             measure: pd.DataFrame | pd.Series | None, 
             transform_points: np.ndarray = np.ndarray((13, 6))
         ) -> None:
@@ -58,14 +59,17 @@ class Trajectories:
         self.N = amount_points
         self.sigma_points = sigma_points
         self.measure = measure
-        self.t_start = t_start
+        self.t0 = t_start
         self.t_k = t_k
         self.orb_list = []
         self.transform_points = transform_points
 
 
     @staticmethod
-    def move_point(args):
+    def move_point(args: tuple[
+                        pyorbs.pyorbs.orbit, 
+                        pyorbs.pyorbs.ephem_time
+                        ]) -> pyorbs.pyorbs.orbit:
         orb, t_k = args
         orb.move(t_k)
         return orb
@@ -74,8 +78,9 @@ class Trajectories:
         """ Протягивает облако сигма точек в заданный момент времени.
         """
 
-        for i in range (self.N):
-            orb = pyorbs.pyorbs.orbit(x = self.sigma_points[i], time = self.t_start)
+        for i in range(self.N):
+            orb = pyorbs.pyorbs.orbit()
+            orb.state_v, orb.time = self.sigma_points[i], self.t0
             #orb.setup_parameters()
             #orb.move(self.t_k)
             #self.transform_points[i] = orb.state_v
@@ -84,10 +89,10 @@ class Trajectories:
         data_orbs = [(orb, self.t_k) for orb in self.orb_list]
         with mp.Pool(min(self.N, mp.cpu_count())) as p:
             self.orb_list = p.map(self.move_point, data_orbs)
-        
+
         self.transform_points = np.array([orb.state_v for orb in self.orb_list])
 
-    def set_residuals(self) -> np.ndarray | None:
+    def set_residuals(self) -> np.ndarray:
         """ Выдает невязки по измерениям для всех сигма точек
         в момент времени t_cur, взятый из таблицы измерений.
         """
@@ -434,7 +439,7 @@ class SquareRootUKF:
     pred_states: List[np.ndarray] = []
 
     #: Список предсказанных ковариационных матриц 
-    pred_sr_covs: List[np.ndarray] = []
+    pred_covs: List[np.ndarray] = []
 
     #: Список скорректированных векторов состояния
     forward_states: List[np.ndarray] = []
@@ -443,7 +448,7 @@ class SquareRootUKF:
     forward_sr_covs: List[np.ndarray] = []
 
     #: Cписок моментов времени, в которые фильтруем данные
-    times: List[pyorbs.pyorbs.ephem_time] = []
+    times: List[str] = []
 
     #: Список всех сигма точек
     all_sigma_points: List[np.ndarray] = []
@@ -467,15 +472,15 @@ class SquareRootUKF:
             forward_states: List[np.ndarray] = [],
             sr_forward_covs: List[np.ndarray] = [],
             forward_covs: List[np.ndarray] = [],
-            times: List[pyorbs.pyorbs.ephem_time] = [],
+            times: List[str] = [],
             all_transform_points: List[np.ndarray] = [],
         ) -> None:
             """Конструктор сигматочечного фильтра Калмана
             
             Args:
-                P: Ковариационная матрица вектора состояния.
-                t_start: Время начала предсказания.
-                x: Вектор состояния.
+                P: Начальное приближение ковариационной матрицы вектора состояния.
+                t_start: Время начала фильтрации.
+                x: Начальное приближение вектора состояния.
                 sigma_points: Набор сигма точек.
                 R: Ковариационная матрица наблюдения.
                 alpha: Параметр для опредения параметра /lambda для вычисления корня в разложении Холецкого.
@@ -508,7 +513,7 @@ class SquareRootUKF:
 
             self.transform_points = np.zeros((2 * self.dim_x + 1, self.dim_x))
             self.pred_states = pred_states
-            self.pred_sr_covs = pred_covs
+            self.pred_covs = pred_covs
             self.forward_states = forward_states
             self.forward_sr_covs = sr_forward_covs
             self.forward_covs = forward_covs
@@ -606,8 +611,8 @@ class SquareRootUKF:
 
         sqrt_matrix = np.sqrt(self.dim_x + self.par_lambda) * self.SR_cov
         for i in range(self.dim_x):
-            sigma_points[i+1] = self.state_v + sqrt_matrix[:, i]
-            sigma_points[i+1+self.dim_x] = self.state_v - sqrt_matrix[:, i]
+            sigma_points[i+1] = self.state_v + sqrt_matrix[i, :]
+            sigma_points[i+1+self.dim_x] = self.state_v - sqrt_matrix[i, :]
 
         return sigma_points
 
@@ -642,11 +647,11 @@ class SquareRootUKF:
         QR_matrix = np.hstack([QR_matrix, scipy.linalg.sqrtm(self.cov_process_matrix)])
 
         _, R = np.linalg.qr(QR_matrix.T)
-        SR_predict = self.cholupdate(R.T, self.transform_points[0] - pred_state, self.w_cov[0])
+        SR_predict = self.cholupdate(R, self.transform_points[0] - pred_state, self.w_cov[0])
 
         return pred_state, SR_predict, traj
 
-    def correction(self, z: pd.DataFrame, pred_state: np.ndarray,
+    def correction(self, z: pd.Series, pred_state: np.ndarray,
                     SR_predict: np.ndarray, t_k: pyorbs.pyorbs.ephem_time, traj: Trajectories) -> None:
         """ Этап коррекции оценки вектора состояния и корня ковариационной матрицы.
 
@@ -654,7 +659,7 @@ class SquareRootUKF:
             z: таблица с измерениями из класса ContextOD.
             pred_state: предсказанный вектор состояния в момент времени t_k.
             SR_predict: предсказанный корень ковариационной матрицы.
-            t_k: время, на которое происходит коррекция.
+            t_k: момент времени коррекции.
             traj: класс протянутых траекторий, образованных сигма точками.
         
         Returns:
@@ -662,11 +667,12 @@ class SquareRootUKF:
         """
 
         a_priori_meas = np.array(z['val'])
-
+        print(pred_state)
         # 4. Возвращаем невязки по измерениям с помощью пакета
         #    pyorbs и класса Trajectories:
         traj.measure = z
         res_meas = traj.set_residuals()
+        print(res_meas[0][0] / _SEC2RAD, res_meas[0][1] / _SEC2RAD)
         calc_meas = a_priori_meas - res_meas
 
         # 5. Вычисляем предсказанную оценку по измерениям и предсказанный
@@ -678,7 +684,7 @@ class SquareRootUKF:
             QR_matrix[:, i] = sqrt(self.w_cov[1]) * (calc_meas[i+1] - pred_meas)
         QR_matrix = np.hstack([QR_matrix, scipy.linalg.sqrtm(self.cov_matrix_measure)])
         _, R = np.linalg.qr(QR_matrix.T)
-        S = self.cholupdate(R.T, calc_meas[0] - pred_meas, self.w_cov[0])
+        S = self.cholupdate(R, calc_meas[0] - pred_meas, self.w_cov[0])
 
         # 6. Вычисляем перекрестную ковариацию:
         diff_state = traj.transform_points - pred_state
@@ -713,22 +719,17 @@ class SquareRootUKF:
             return
 
         self.state_v = pred_state + Kalman_gain @ res_z
-        self.cov_matrix = self.SR_cov @ self.SR_cov.T
-        #print(f'after corr orb = {self.state_v}')
-        """if len_block == _config.LEN_BLOCK_MEAS - 1:
-            self.state_v = pred_state + Kalman_gain @ res_z
-        else:
-            self.state_v = pred_state
-"""
+        self.cov_matrix = self.SR_cov.T @ self.SR_cov
+
         self.pred_states.append(pred_state)
-        self.pred_sr_covs.append(SR_predict)
+        self.pred_covs.append(SR_predict.T @ SR_predict)
         self.forward_states.append(self.state_v)
         self.forward_sr_covs.append(self.SR_cov)
         self.forward_covs.append(self.cov_matrix)
-        self.times.append(t_k)
+        self.times.append(t_k.__str__())
         self.t_start = t_k
 
-    def step(self, z: pd.DataFrame, t_k: pyorbs.pyorbs.ephem_time):
+    def step(self, z: pd.Series, t_k: pyorbs.pyorbs.ephem_time):
         """ Шаг фильтрации:
         Args:
             z: Таблица с измерениями.
@@ -741,28 +742,39 @@ class SquareRootUKF:
         pred_state, SR_predict, traj = self.prediction(t_k)
         self.correction(z, pred_state, SR_predict, t_k, traj)
 
-    def move(self, t_k):
+    def move(self, t_k: pyorbs.pyorbs.ephem_time) -> None:
         """Вызываем метод в случае падения обновления Холецкого для корня 
         ковариационной матрицы на этапе коррекции."""
-        orb = pyorbs.pyorbs.orbit(x = self.state_v, time = self.t_start)
+        orb = pyorbs.pyorbs.orbit()
+        orb.state_v, orb.time = self.state_v, self.t_start
         orb.setup_parameters()
         orb.move(t_k)
+        #_, self.SR_cov, _ = self.prediction(t_k)
         self.state_v = orb.state_v
         self.t_start = t_k
         
-    '''def new_filter_step(self, block_meas: pd.DataFrame):
+    def new_filter_step(self, block_meas: pd.DataFrame):
         """ Новый шаг фильтрации. Накапливает несколько измерений.
         Args:
             block_meas: набор измерений, которые накапливаются
         
         """
-        i = 0 
+        t0 = pyorbs.pyorbs.ephem_time(block_meas.iloc[0]['time'].to_pydatetime())
+        pred_state, SR_pred, init_traj = self.prediction(t0)
+        print(pred_state)
         for _, m in block_meas.iterrows():
-            t_k = m['time'].to_pydatetime()
-            pred_state, SR_pred, traj = self.prediction(t_k)
-            self.correction(m, pred_state, SR_pred, t_k, traj)
-            i += 1
-            print(f'Коррекция: {t_k}')'''
+            t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
+            orbit = pyorbs.pyorbs.orbit()
+            orbit.state_v, orbit.time = pred_state, self.t_start
+            orbit.setup_parameters()
+            orbit.move(t_k)
+            pred_state = orbit.state_v
+            cur_traj = Trajectories(amount_points = 13, sigma_points = init_traj.sigma_points,
+                                    t_start = t0, t_k = t_k, measure = None)
+            cur_traj.get_transform_sigma_points()
+            _, SR_pred, _ = self.prediction(t_k)
+            self.correction(m, pred_state, SR_pred, t_k, cur_traj)
+            print(f'Коррекция: {t_k}')
 
     def rts_smoother(self) -> tuple[List[np.ndarray], List[np.ndarray]]:
         """ Процесс сглаживания оценок вектора состояния и ковариационной
@@ -774,7 +786,7 @@ class SquareRootUKF:
         
         print(f'Cглаживание...')
         smoothed_states = self.forward_states.copy()
-        smoothed_sr_covs = self.forward_sr_covs.copy()
+        smoothed_covs = self.forward_covs.copy()
         
         for k in range (len(self.forward_states)-2, -1, -1):
             cross_cov = np.zeros((self.dim_x, self.dim_x))
@@ -784,25 +796,21 @@ class SquareRootUKF:
                 cross_cov += self.w_cov[i] * (dif @ dif_pred.T)
 
             try:
-                Gain = self.forward_sr_covs[k] @ cholesky(cross_cov) @ np.linalg.inv(self.pred_sr_covs[k+1])
+                Gain = cross_cov @ np.linalg.inv(self.pred_covs[k+1])
             except:
-                Gain = self.forward_sr_covs[k] @ cholesky(cross_cov) @ np.linalg.pinv(self.pred_sr_covs[k+1])
+                Gain = cross_cov @ np.linalg.pinv(self.pred_covs[k+1])
 
             smoothed_states[k] = self.forward_states[k] + Gain @ (smoothed_states[k+1] - self.pred_states[k+1])
-            smoothed_sr_covs[k] = self.forward_sr_covs[k] + Gain @ (smoothed_sr_covs[k+1] - self.pred_sr_covs[k+1]) @ Gain.T
-
-        smoothed_covs = smoothed_sr_covs.copy()
-        for k in range (len(smoothed_sr_covs)):
-            smoothed_covs[k] = smoothed_sr_covs[k] @ smoothed_sr_covs[k].T
+            smoothed_covs[k] = self.forward_covs[k] + Gain @ (smoothed_covs[k+1] - self.pred_covs[k+1]) @ Gain.T
 
         return smoothed_states, smoothed_covs
 
-    def draw_position_std(self):#, smoothed_covs: List[np.ndarray]):
+    def draw_position_std(self, smoothed_covs: List[np.ndarray]):
         """ Рисует график СКО по положению вектора состояния.
         """
-        sigma_x = [sqrt(arr[0,0] * 1000) * 1000 for arr in self.forward_covs]
-        sigma_y = [sqrt(arr[1,1] * 1000) * 1000 for arr in self.forward_covs]
-        sigma_z = [sqrt(arr[2,2] * 1000) * 1000 for arr in self.forward_covs]
+        sigma_x = [sqrt(arr[0,0] * 1000) * 1000 for arr in smoothed_covs]
+        sigma_y = [sqrt(arr[1,1] * 1000) * 1000 for arr in smoothed_covs]
+        sigma_z = [sqrt(arr[2,2] * 1000) * 1000 for arr in smoothed_covs]
         
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, sharex = True, figsize=(19,10))
         fig.suptitle('СКО положения (метры)', fontsize = 16) # type: ignore
