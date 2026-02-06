@@ -47,47 +47,22 @@ def main():
     t0 = datetime(2025, 12, 1)
     t = t0 + timedelta(days = 28)
     orb, P0 = get_initial_params(obj, t0)
-    print(orb.state_v)
+
     ctx = ContextOD(obj_id = obj, initial_orbit = orb, t_start = t0, t_stop = t, mle_limit = 1)
     meas = ctx.meas_data.sort_values('time')
     #ctx.single_od()
     #plot_res(ctx.current_step.meas_tab)
-    orb.state_v += np.array([sigma_pos, 0, 0, sigma_v, sigma_v, sigma_v])
+    #orb.state_v += np.array([sigma_pos, 0, 0, sigma_v, sigma_v, sigma_v])
 
-    P0 = np.zeros([6,6])
-    P0[0,0] = sigma_pos ** 2
-    P0[1, 1] = P0[2, 2] = 0
-    P0[3,3] = P0[4, 4] = P0[5, 5] = sigma_v ** 2
-    P0 += P_const
+    #P0 = np.zeros([6,6])
+    #P0[0,0] = sigma_pos ** 2
+    #P0[3,3] = P0[4, 4] = P0[5, 5] = sigma_v ** 2
+    #P0 += P_const
 
     filter = SquareRootUKF(t_start = orb.time, x = orb.state_v, P = P0, meas = meas, lim_filter = 5)
     _,_ = filter.filtration()
+
     check_residuals(filter.state_v, meas)
-
-    t0 = orb.time
-    t_end = ephem_time(meas.iloc[-1]['time'].to_pydatetime())
-
-    orb.state_v, orb.time = filter.state_v, t_end
-    _, cov, _ = filter.prediction(t0)
-    print(filter.transform_points[0])
-    filter.t_start, filter.state_v, filter.cov_matrix = t0, filter.transform_points[0], cov
-    _, _ = filter.filtration()
-    check_residuals(filter.state_v, meas)
-
-    orb.state_v, orb.time = filter.state_v, t_end
-    _, cov, _ = filter.prediction(t0)
-    print(filter.transform_points[0])
-    filter.t_start, filter.state_v, filter.cov_matrix = t0, filter.transform_points[0], cov
-    _, _ = filter.filtration()
-    check_residuals(filter.state_v, meas)
-
-    orb.state_v, orb.time = filter.state_v, t_end
-    _, cov, _ = filter.prediction(t0)
-    print(filter.transform_points[0])
-    filter.t_start, filter.state_v, filter.cov_matrix = t0, filter.transform_points[0], cov
-    _, _ = filter.filtration()
-    check_residuals(filter.state_v, meas)
-
     #filter.draw_position_std(covs)
 
 if __name__ == "__main__":
