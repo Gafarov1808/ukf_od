@@ -38,7 +38,9 @@ def get_initial_params(obj: int, t_start: datetime) -> tuple[orbit, np.ndarray]:
     return init_orbit, P_initial
 
 def check_residuals(state: np.ndarray, meas: pd.DataFrame):
-    orb = orbit(x = state, time = ephem_time(meas.iloc[-1]['time'].to_pydatetime()))
+    orb = orbit()
+    orb.state_v, orb.time = state, ephem_time(meas.iloc[-1]['time'].to_pydatetime())
+    orb.change_param({'calc_partials': True})
     step = od_step(orb, meas)
     plot_res(step.meas_tab)
 
@@ -52,14 +54,14 @@ def main():
     meas = ctx.meas_data.sort_values('time')
     #ctx.single_od()
     #plot_res(ctx.current_step.meas_tab)
-    #orb.state_v += np.array([sigma_pos, 0, 0, sigma_v, sigma_v, sigma_v])
+    orb.state_v += np.array([sigma_pos, 0, 0, sigma_v, sigma_v, sigma_v])
 
-    #P0 = np.zeros([6,6])
-    #P0[0,0] = sigma_pos ** 2
-    #P0[3,3] = P0[4, 4] = P0[5, 5] = sigma_v ** 2
-    #P0 += P_const
+    P0 = np.zeros([6,6])
+    P0[0,0] = sigma_pos ** 2
+    P0[3,3] = P0[4, 4] = P0[5, 5] = sigma_v ** 2
+    P0 += P_const
 
-    filter = SquareRootUKF(t_start = orb.time, x = orb.state_v, P = P0, meas = meas, lim_filter = 5)
+    filter = SquareRootUKF(t_start = orb.time, x = orb.state_v, P = P0, meas = meas)
     _,_ = filter.filtration()
 
     check_residuals(filter.state_v, meas)
