@@ -4,7 +4,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from typing import List
 from math import sqrt
-from datetime import datetime
 
 import pyorbs
 import _config
@@ -23,7 +22,7 @@ class Trajectories:
     sigma_points: np.ndarray
 
     #: Набор измерений
-    measure: pd.DataFrame | pd.Series | None
+    measure: pd.Series | None
 
     #: Момент времени, от которого протягиваем орбиту
     t_start: pyorbs.pyorbs.ephem_time
@@ -43,7 +42,7 @@ class Trajectories:
             sigma_points: np.ndarray,
             t_start: pyorbs.pyorbs.ephem_time,
             t_k: pyorbs.pyorbs.ephem_time,
-            measure: pd.DataFrame | pd.Series | None, 
+            measure: pd.Series | None, 
         ) -> None:
         """
         Args:
@@ -68,18 +67,12 @@ class Trajectories:
         """
 
         for i in range(self.N):
-            #pyorbs.bal.uim_flushed()
             orb = pyorbs.pyorbs.orbit()
             orb.state_v, orb.time = self.sigma_points[i], self.t0
             orb.setup_parameters()
             orb.move(self.t_k)
             self.transform_points[i] = orb.state_v
             self.orb_list.append(orb)
-        print(self.sigma_points[0], self.t0.utc())
-        test_orb = pyorbs.pyorbs.orbit()
-        test_orb.state_v, test_orb.time = self.sigma_points[0], self.t0
-        pyorbs.pyorbs.save(test_orb, 'test_orbit')
-        print(self.transform_points[0], self.t_k.utc())
 
 
     def set_residuals(self) -> np.ndarray:
@@ -88,10 +81,14 @@ class Trajectories:
         """
         
         dz: List[np.ndarray] = []
+
         for (i, orbit) in enumerate(self.orb_list):
-            orbit.setup_parameters()
-            m = pyorbs.pyorbs_det.Measurements(self.measure.to_frame())
-            step = pyorbs.pyorbs_det.newton_step(dim = 6, meas_tab=m.tracking)
+            #orbit.setup_parameters()
+            if self.measure is not None:
+                m = pyorbs.pyorbs_det.Measurements(self.measure.to_frame())
+                step = pyorbs.pyorbs_det.newton_step(dim = 6, meas_tab = m.tracking)
+            else:
+                step = None
             m = pyorbs.pyorbs_det.process_meas_record(orbit, self.measure, dim = 6, step = step)
             dz.append(m['res'][:, 0] * _SEC2RAD)
             self.transform_points[i] = orbit.state_v
@@ -178,7 +175,7 @@ class SquareRootUKF:
             self, 
             P: np.ndarray,
             t_start: pyorbs.pyorbs.ephem_time,
-            x: np.ndarray,
+            v: np.ndarray,
             meas: pd.DataFrame,
             sigma_points: np.ndarray | None = None,
             R: np.ndarray = _config.R_DEFAULT,
@@ -221,7 +218,7 @@ class SquareRootUKF:
             """
             self.cov_matrix = P
             self.t_start = t_start
-            self.state_v = x
+            self.state_v = v
             self.cov_process_matrix = _config.DEFAULT_COV_PROCESS
             self.cov_matrix_measure = R
             self.alpha = alpha
@@ -278,17 +275,18 @@ class SquareRootUKF:
         try:
             P_new = R.T @ R + sqrt(alpha) * np.outer(x, x)
         except: 
-            P_new = R.T @ R - np.outer(x, x)
+            P_new = R.T @ R - abs(alpha) * np.outer(x, x)
+            print(P_new[:3, :3])
 
         try:
             return scipy.linalg.cholesky(P_new)
         
         except ValueError:
-            #self.SR_cov = self.SR_cov / 10
             #_, s, Vt = np.linalg.svd(P_new)
             #s = np.maximum(s, 0)
             #rk = np.sum(s > 1e-16)
             #R_new = np.diag(np.sqrt(s[:rk])) @ Vt[:rk, :]
+            #return R_new
             raise ValueError('Обновление Холецкого не удалось')
 
     def prediction(self, t_k: pyorbs.pyorbs.ephem_time) -> tuple[np.ndarray, np.ndarray, Trajectories]:
@@ -320,6 +318,7 @@ class SquareRootUKF:
         # 3. Предсказываем оценку и корень ковариационной матрицы:
         
         pred_state = self.w_mean @ traj.transform_points
+
         QR_matrix = np.zeros((self.dim_x, 2 * self.dim_x))
         for i in range (2 * self.dim_x):
             QR_matrix[:, i] = sqrt(self.w_cov[1]) * (traj.transform_points[i+1] - pred_state)
@@ -355,12 +354,8 @@ class SquareRootUKF:
         self.all_transform_points.append(traj.transform_points)
 
         calc_meas = a_priori_meas - res_meas
-        cov = (SR_predict.T @ SR_predict)[:3, :3]
-        #print(SR_predict.T @ SR_predict)
-        print(f'std = {np.sqrt(cov.diagonal())}')
         print(res_meas[0][0] / _SEC2RAD, res_meas[0][1] / _SEC2RAD)
-        if abs(t_k - pyorbs.pyorbs.ephem_time(datetime(2025, 12, 3, 12, 28, 6, 700000))) < 1e-6:
-            exit()
+
         # 5. Вычисляем предсказанную оценку по измерениям и предсказанный
         #    корень ковариационной матрицы с помощью алгоритма cholupdate:
         
@@ -371,13 +366,12 @@ class SquareRootUKF:
             QR_matrix[:, i] = sqrt(self.w_cov[1]) * (calc_meas[i+1] - pred_meas)
         QR_matrix = np.hstack([QR_matrix, scipy.linalg.cholesky(self.cov_matrix_measure)])
         _, R_meas = np.linalg.qr(QR_matrix.T)
-        S = self.cholupdate(R_meas, calc_meas[0] - pred_meas, self.w_cov[0])
+        S_meas = self.cholupdate(R_meas, calc_meas[0] - pred_meas, self.w_cov[0])
 
         # 6. Вычисляем перекрестную ковариацию:
         
         diff_state = traj.transform_points - pred_state
         diff_meas = calc_meas - pred_meas
-
         Pyz = np.zeros((self.dim_x, 2))
         for i in range(2 * self.dim_x + 1):
             Pyz += self.w_cov[i] * np.outer(diff_state[i], diff_meas[i])
@@ -385,9 +379,12 @@ class SquareRootUKF:
         # 7. Вычисляем матрицу усиления:
 
         try:
-            Kalman_gain = Pyz @ np.linalg.inv(S @ S.T)
+            Kalman_gain = scipy.linalg.solve_triangular(S_meas,
+                                                        scipy.linalg.solve_triangular(S_meas.T, Pyz.T, lower = False),
+                                                        lower=False).T
+            #Kalman_gain = Pyz @ np.linalg.inv(S @ S.T)
         except np.linalg.LinAlgError:
-            Kalman_gain = Pyz @ np.linalg.pinv(S @ S.T)
+            Kalman_gain = Pyz @ np.linalg.pinv(S_meas @ S_meas.T)
 
         # 8. Вычисляем невязку по измерениям:
 
@@ -396,10 +393,10 @@ class SquareRootUKF:
         # 9. Корректируем вектор состояния и корень ковариационной матрицы.
         #    В случае неудачи обновления Холецкого для корня завершаем
         #    шаг и переходим к следующему моменту времени:
-        
+
         #S_old = self.SR_cov
         try:
-            U = Kalman_gain @ S
+            U = Kalman_gain @ S_meas
             S_new = SR_predict.copy()
             for i in range(U.shape[1]):
                 S_new = self.cholupdate(S_new, U[:, i], -1.0)
@@ -407,9 +404,6 @@ class SquareRootUKF:
 
         except ValueError as e:
             print(e)
-            #self.SR_cov *= 0.1
-            #self.SR_cov = S_old
-            self.cov_matrix = self.SR_cov.T @ self.SR_cov
             return
 
         self.state_v = pred_state + Kalman_gain @ res_z
@@ -510,3 +504,66 @@ class SquareRootUKF:
         plt.tight_layout()
         plt.show()
 
+
+class LinearKalman:
+    
+    def __init__(self,
+            P: np.ndarray,
+            t_start: pyorbs.pyorbs.ephem_time,
+            v: np.ndarray,
+            meas: pd.DataFrame,
+            R: np.ndarray = _config.R_DEFAULT):
+        
+        self.cov = P
+        self.t0 = t_start
+        self.state_v = v
+        self.meas = meas
+        self.cov_meas = R
+
+
+    def prediction(self, t_k: pyorbs.pyorbs.ephem_time) -> tuple[np.ndarray, np.ndarray]:
+
+        orb = pyorbs.pyorbs.orbit()
+        orb.state_v, orb.time = self.state_v, self.t0
+        orbits = np.random.multivariate_normal(orb.state_v, self.cov, 100)
+        samples = np.ndarray((6, 100))
+
+        for j in range(len(orbits)):
+            transform_orbit = pyorbs.pyorbs.orbit()
+            transform_orbit.state_v, transform_orbit.time = orbits[j], self.t0
+            transform_orbit.setup_parameters()
+            transform_orbit.move(t_k)
+            samples[:, j] = transform_orbit.state_v
+
+        mean = samples.mean(axis=1)
+        P_pred = np.cov(samples)
+        
+        return mean, P_pred
+    
+    def correction(self, z: pd.Series, mean: np.ndarray, 
+                        P_pred: np.ndarray, t_k: pyorbs.pyorbs.ephem_time) -> None:
+        
+
+        res: List[float] = []
+        m = pyorbs.pyorbs_det.Measurements(z.to_frame())
+        step = pyorbs.pyorbs_det.newton_step(dim = 6, meas_tab = m.tracking)
+        orbit = pyorbs.pyorbs.orbit()
+        orbit.state_v, orbit.time = mean, t_k
+        m, mod_meas = pyorbs.pyorbs_det.process_meas_record(orbit, z, dim = 6, step = step)
+        res.append(m['res'][:, 0] * _SEC2RAD)
+
+        Kalman_gain = self.cov @ mod_meas.T @ np.linalg.inv(mod_meas @ self.cov @ mod_meas.T + self.cov_meas)
+        self.state_v = mean + Kalman_gain @ res
+        self.cov = (np.eye(6) - Kalman_gain @ mod_meas) @ P_pred
+
+
+    def step(self, m: pd.Series, t_k: pyorbs.pyorbs.ephem_time) -> None:
+        mean, P = self.prediction(t_k)
+        self.correction(m, mean, P, t_k)
+
+    def filtration(self) -> None:
+
+        for _, m in self.meas.iterrows():
+            t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
+            self.step(m, t_k)
+            print(f'Коррекция: {t_k}')
