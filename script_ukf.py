@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from datetime import timedelta, datetime
 from sqlalchemy import select, cast, DateTime
+
 from models import SquareRootUKF, LinearKalman
 
 from kiamdb.orbits import OrbitSolution, SessionOrbits
@@ -60,7 +61,6 @@ def main():
     P0[0,0] = sigma_pos ** 2
     P0[3,3] = P0[4, 4] = P0[5, 5] = sigma_v ** 2
     P0 += P_const
-
     #filter = SquareRootUKF(t_start = orb.time, v = orb.state_v, P = P0, meas = meas)
     filter = LinearKalman(t_start = orb.time, P = P0, v = orb.state_v, meas = meas)
     _,_ = filter.filtration()

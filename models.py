@@ -567,3 +567,4 @@ class LinearKalman:
             t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
             self.step(m, t_k)
             print(f'Коррекция: {t_k}')
+
