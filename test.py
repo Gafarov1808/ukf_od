@@ -1,9 +1,25 @@
 import numpy as np
 from pyorbs.pyorbs import orbit, ephem_time, load
 import pyorbs
-from datetime import datetime
+from datetime import datetime, timedelta
+from kiamdb.od import ContextOD
+from models import LinearKalman, SquareRootUKF
+from script_ukf import get_initial_params
 
 _SEC2RAD = np.pi / 180. / 3600.
+obj = 43109
+t0 = datetime(2025, 12, 1)
+t_start = ephem_time(datetime(2025,12,4,17,42,58))
+t_k = ephem_time(datetime(2025,12,14,19,42,38))
+v0 = np.array([-21.79047335, 19.1418796, -0.42692117, -1.39456985, -1.61273013, -3.00830127])
+P0 = np.array([
+  [ 2.36333026e-02, -1.78226118e-02,  3.59120112e-03, 2.89472797e-03, -5.34275931e-04,  2.17505440e-03], 
+  [-1.78226118e-02,  1.34896738e-02, -2.66543084e-03, -2.19065250e-03, 4.09443892e-04, -1.64231338e-03],
+  [ 3.59120112e-03, -2.66543084e-03,  5.94915896e-04,  4.30993378e-04,  -7.53293304e-05,  3.29094171e-04],
+  [ 2.89472797e-03, -2.19065250e-03,  4.30993378e-04,  3.56875138e-04,-6.69744834e-05,  2.66816093e-04],
+  [-5.34275931e-04,  4.09443892e-04, -7.53293304e-05, -6.69744834e-05, 1.35688669e-05, -4.92468235e-05], 
+  [ 2.17505440e-03, -1.64231338e-03,  3.29094171e-04,  2.66816093e-04, -4.92468235e-05,  2.00616650e-04]
+])
 
 def partial_der():
   orb = orbit()
@@ -22,16 +38,14 @@ def partial_der():
       [ 1.05472672e-07, -1.08164274e-09,  4.78079196e-09, -7.73282725e-11, -5.26347484e-11,  9.09310075e-10]
   ])
 
-  #print(orb.state_v[:6], orb.time.utc())
   t = datetime(2025, 12, 3, 12, 28, 6, 700000)
-  #t = datetime(2025, 12, 1, 18, 19, 6, 700000)
 
   orb.move(t)
   F = orb.state_v[orb.structure['calc_partials']].reshape(6,6)
   print(orb.state_v)
   print(F)
   cov = F.T @ cov @ F
-  #print(orb.state_v[:6], orb.time.utc())
+  print(orb.state_v[:6], orb.time.utc())
   #print(cov)
   print(f'std part_der = {np.sqrt(cov.diagonal())}')
 
@@ -66,5 +80,36 @@ def monte_carlo(n):
   P = np.cov(samples)
   print(f'std mon-carl = {np.sqrt(P.diagonal())}')
 
-monte_carlo(1000)
-partial_der()
+def test_ukf(obj, t0, t_start, t_k, v0, P0):
+
+  t = t0 + timedelta(days = 28)
+  orb, _ = get_initial_params(obj, t0)
+
+  ctx = ContextOD(obj_id = obj, initial_orbit = orb, t_start = t0, t_stop = t, mle_limit = 1)
+  meas = ctx.meas_data.sort_values('time')
+  z = meas.iloc[14].copy()
+  z['sta_id'] = int(z['sta_id'])
+  t_start = ephem_time(datetime(2025, 12, 1, 17, 49, 36))
+  t_k = ephem_time(datetime(2025, 12, 3, 12, 28, 6, 700000))
+  filter = SquareRootUKF(t_start = t_start, v = v0, P = P0, meas = meas)
+  filter.step(z, t_k)
+  print(filter.cov_matrix[:3, :3])
+
+def test_lin(obj, t0, t_start, t_k, v0, P0):
+  
+  t = t0 + timedelta(days = 28)
+  orb, _ = get_initial_params(obj, t0)
+
+  ctx = ContextOD(obj_id = obj, initial_orbit = orb, t_start = t0, t_stop = t, mle_limit = 1)
+  meas = ctx.meas_data.sort_values('time')
+  z = meas.iloc[14].copy()
+  z['sta_id'] = int(z['sta_id'])
+  
+  filter = LinearKalman(t_start = t_start, v = v0, P = P0, meas = meas)
+  filter.step(z, t_k)
+  print(filter.cov[:3, :3])
+
+#monte_carlo(1000)
+#partial_der()
+test_ukf(obj, t0, t_start, t_k, v0, P0)
+test_lin(obj, t0, t_start, t_k, v0, P0)
