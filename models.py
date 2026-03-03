@@ -6,6 +6,7 @@ from typing import List
 from math import sqrt
 
 import pyorbs
+import scipy.linalg
 import _config
 
 _SEC2RAD = np.pi / 180. / 3600.
@@ -84,8 +85,8 @@ class Trajectories:
         for (i, orbit) in enumerate(self.orb_list):
             orbit.setup_parameters()
             if self.measure is not None:
-                m = pyorbs.pyorbs_det.Measurements(self.measure.to_frame())
-                step = pyorbs.pyorbs_det.newton_step(dim = 6, meas_tab = m.tracking)
+                meas = pyorbs.pyorbs_det.Measurements(self.measure.to_frame())
+                step = pyorbs.pyorbs_det.newton_step(dim = 6, meas_tab = meas.tracking)
             else:
                 step = None
             m = pyorbs.pyorbs_det.process_meas_record(orbit, self.measure, dim = 6, step = step)
@@ -270,10 +271,9 @@ class SquareRootUKF:
         return sigma_points
 
     def cholupdate(self, R: np.ndarray, x: np.ndarray, alpha: float) -> np.ndarray:
-
         if alpha > 0:
             P_new = R.T @ R + sqrt(alpha) * np.outer(x, x)
-        elif alpha < 0 and abs(alpha + 1.0) > 0.1:
+        elif alpha < 0 and abs(alpha + 1.0) > 0.00001:
             P_new = R.T @ R + sqrt(abs(alpha)) * np.outer(x, x)
         else:
             P_new = R.T @ R - abs(alpha) * np.outer(x, x)
@@ -351,14 +351,14 @@ class SquareRootUKF:
         # 4. Возвращаем невязки по измерениям с помощью пакета
         #    pyorbs и класса Trajectories и считаем посчитанные по модели
         #    измерения:
-        
+
         traj.measure = z
         res_meas = traj.set_residuals()
         self.all_transform_points.append(traj.transform_points)
 
         calc_meas = a_priori_meas - res_meas
         print(f'res SRUKF = {res_meas[0][0] / _SEC2RAD}, {res_meas[0][1] / _SEC2RAD}')
-        print(np.sqrt(np.diag(SR_predict.T @ SR_predict)))
+
 
         # 5. Вычисляем предсказанную оценку по измерениям и предсказанный
         #    корень ковариационной матрицы с помощью алгоритма cholupdate:
@@ -386,10 +386,9 @@ class SquareRootUKF:
         #    в случае неудачи, вычисляем псевдоопределенную матрицу:
 
         try:
-            Kalman_gain = Pyz @ np.linalg.inv(S_meas @ S_meas.T)
+            Kalman_gain = Pyz @ np.linalg.inv(S_meas.T @ S_meas)
         except np.linalg.LinAlgError:
-            Kalman_gain = Pyz @ np.linalg.pinv(S_meas @ S_meas.T)
-
+            Kalman_gain = Pyz @ np.linalg.pinv(S_meas.T @ S_meas)
 
         # 8. Вычисляем невязку по измерениям (разница 
         #    между считанными наблюдениями и "среднему" по Калману
@@ -402,20 +401,21 @@ class SquareRootUKF:
         #    В случае неудачи обновления Холецкого для корня завершаем
         #    шаг и переходим к следующему моменту времени:
 
-        #S_old = self.SR_cov
+        #U = Kalman_gain @ S_meas
+        #S_new = SR_predict.copy()
+        P_new = SR_predict.T @ SR_predict - Kalman_gain @ S_meas.T @ S_meas @ Kalman_gain.T
+        #print(f'P = {P_new[:3,:3]}')
+        #for i in range(U.shape[1]):
+        #    S_new = self.cholupdate(S_new, U[:, 0], -1.0)
         self.state_v = pred_state + Kalman_gain @ res_z
-        try:
-            U = Kalman_gain @ S_meas
-            S_new = SR_predict.copy()
-            for i in range(U.shape[1]):
-                S_new = self.cholupdate(S_new, U[:, i], -1.0)
-            self.SR_cov = S_new
-        except ValueError as e:
-            self.state_v = pred_state
-            self.SR_cov = SR_predict
-            print(e)
-            #return
 
+        try:
+            self.SR_cov = scipy.linalg.cholesky(P_new)
+            #print(scipy.linalg.cholesky(P_new)[:3, :3])
+        except np.linalg.LinAlgError as e:
+            self.SR_cov = SR_predict
+            print(f'Ошибка: {e}')
+            return
         self.cov_matrix = self.SR_cov.T @ self.SR_cov
 
 
@@ -441,9 +441,12 @@ class SquareRootUKF:
             Уточненная оценка и ковариационная матрица.
         
         """
-        pred_state, SR_predict, traj = self.prediction(t_k)
-        self.correction(z, pred_state, SR_predict, t_k, traj)
-
+        try:
+            pred_state, SR_predict, traj = self.prediction(t_k)
+            self.correction(z, pred_state, SR_predict, t_k, traj)
+        except pyorbs.exceptions.ReentryException as e:
+            print(f'Шаг фильтрации не удался: {e}')
+            self.t_start = t_k
 
     def filtration(self) -> tuple[np.ndarray, List[np.ndarray]]:
         """Процесс фильтрации.
@@ -455,6 +458,8 @@ class SquareRootUKF:
         for _, m in self.meas.iterrows():
             t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
             self.step(m, t_k)
+            #print(f'state = {self.state_v}')
+            #print(f'cov = {self.cov_matrix}')
             print(f'Коррекция: {t_k}')
             print('=' * 90)
 
@@ -567,8 +572,7 @@ class LinearKalman:
         
         self.state_v = mean + Kalman_gain @ res.T
         self.cov = (np.eye(6) - Kalman_gain @ mod_meas) @ P_pred
-        print(f'поправка = {Kalman_gain @ mod_meas @ P_pred}')
-        print(np.sqrt(np.diagonal(self.cov)))
+        #print(np.sqrt(np.diagonal(self.cov)))
 
 
     def step(self, m: pd.Series, t_k: pyorbs.pyorbs.ephem_time) -> None:
