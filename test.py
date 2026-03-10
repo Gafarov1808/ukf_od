@@ -7,19 +7,27 @@ from models import LinearKalman, SquareRootUKF
 from script_ukf import get_initial_params
 
 _SEC2RAD = np.pi / 180. / 3600.
-obj = 43109
-t0 = datetime(2025, 12, 1)
-t_start = ephem_time(datetime(2025,12,4,17,42,58))
-t_k = ephem_time(datetime(2025,12,14,19,42,38))
-v0 = np.array([-21.79047335, 19.1418796, -0.42692117, -1.39456985, -1.61273013, -3.00830127])
+obj = 43087
+t0 = datetime(2026, 1, 1)
+t = t0 + timedelta(days = 28)
+orb, _ = get_initial_params(obj, t0)
+
+t_start = ephem_time(datetime(2026,1,1,19,17,55))
+t_k = ephem_time(datetime(2026,1,2,18,0,29, 710 ))
+v0 = np.array([29.31671358, 30.77124676, -2.11061921, -2.19041675,  2.10544439,  0.35919605])
 P0 = np.array([
-  [ 2.36333026e-02, -1.78226118e-02,  3.59120112e-03, 2.89472797e-03, -5.34275931e-04,  2.17505440e-03], 
-  [-1.78226118e-02,  1.34896738e-02, -2.66543084e-03, -2.19065250e-03, 4.09443892e-04, -1.64231338e-03],
-  [ 3.59120112e-03, -2.66543084e-03,  5.94915896e-04,  4.30993378e-04,  -7.53293304e-05,  3.29094171e-04],
-  [ 2.89472797e-03, -2.19065250e-03,  4.30993378e-04,  3.56875138e-04,-6.69744834e-05,  2.66816093e-04],
-  [-5.34275931e-04,  4.09443892e-04, -7.53293304e-05, -6.69744834e-05, 1.35688669e-05, -4.92468235e-05], 
-  [ 2.17505440e-03, -1.64231338e-03,  3.29094171e-04,  2.66816093e-04, -4.92468235e-05,  2.00616650e-04]
-])
+  [ 2.42765722e-01,  9.17646249e-01,  6.63171419e-03, -9.31071135e-02,6.48563753e-02,  1.14968000e-02],
+  [ 9.17646249e-01,  3.91423675e+00,  4.38056283e-02 ,-6.82496768e-01,1.67138275e-01 , 7.71090516e-02],
+  [ 6.63171419e-03,  4.38056283e-02,  1.09885337e-03, -1.54284538e-02,-1.25838605e-03,  1.63158146e-03],
+  [-9.31071135e-02, -6.82496768e-01, -1.54284538e-02  ,1.68791343e+00,5.20939660e-01 ,-1.68559405e-01],
+  [ 6.48563753e-02,  1.67138275e-01, -1.25838605e-03  ,5.20939660e-01,2.01288128e-01 ,-5.10656957e-02],
+  [ 1.14968000e-02,  7.71090516e-02 , 1.63158146e-03, -1.68559405e-01,-5.10656957e-02,  1.68556850e-02]
+  ])
+
+ctx = ContextOD(obj_id = obj, initial_orbit = orb, t_start = t0, t_stop = t, mle_limit = 1)
+meas = ctx.meas_data.sort_values('time')
+z = meas.iloc[173].copy()
+z['sta_id'] = int(z['sta_id'])
 
 def partial_der():
   orb = orbit()
@@ -80,36 +88,16 @@ def monte_carlo(n):
   P = np.cov(samples)
   print(f'std mon-carl = {np.sqrt(P.diagonal())}')
 
-def test_ukf(obj, t0, t_start, t_k, v0, P0):
-
-  t = t0 + timedelta(days = 28)
-  orb, _ = get_initial_params(obj, t0)
-
-  ctx = ContextOD(obj_id = obj, initial_orbit = orb, t_start = t0, t_stop = t, mle_limit = 1)
-  meas = ctx.meas_data.sort_values('time')
-  z = meas.iloc[14].copy()
-  z['sta_id'] = int(z['sta_id'])
-  t_start = ephem_time(datetime(2025, 12, 1, 17, 49, 36))
-  t_k = ephem_time(datetime(2025, 12, 3, 12, 28, 6, 700000))
+def test_ukf(t_start, v0, P0, meas, z, t_k):
   filter = SquareRootUKF(t_start = t_start, v = v0, P = P0, meas = meas)
   filter.step(z, t_k)
-  print(filter.cov_matrix[:3, :3])
 
-def test_lin(obj, t0, t_start, t_k, v0, P0):
-  
-  t = t0 + timedelta(days = 28)
-  orb, _ = get_initial_params(obj, t0)
-
-  ctx = ContextOD(obj_id = obj, initial_orbit = orb, t_start = t0, t_stop = t, mle_limit = 1)
-  meas = ctx.meas_data.sort_values('time')
-  z = meas.iloc[14].copy()
-  z['sta_id'] = int(z['sta_id'])
-  
+def test_lin(t_start, v0, P0, meas, z, t_k):
+    
   filter = LinearKalman(t_start = t_start, v = v0, P = P0, meas = meas)
   filter.step(z, t_k)
-  print(filter.cov[:3, :3])
 
 #monte_carlo(1000)
 #partial_der()
-test_ukf(obj, t0, t_start, t_k, v0, P0)
-test_lin(obj, t0, t_start, t_k, v0, P0)
+test_ukf(t_start, v0, P0, meas, z, t_k)
+test_lin(t_start, v0, P0, meas, z, t_k)

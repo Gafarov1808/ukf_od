@@ -89,7 +89,7 @@ class Trajectories:
                 step = pyorbs.pyorbs_det.newton_step(dim = 6, meas_tab = meas.tracking)
             else:
                 step = None
-            m = pyorbs.pyorbs_det.process_meas_record(orbit, self.measure, dim = 6, step = step)
+            m, _ = pyorbs.pyorbs_det.process_meas_record(orbit, self.measure, dim = 6, step = step)
             dz.append(m['res'][:, 0] * _SEC2RAD)
             self.transform_points[i] = orbit.state_v
 
@@ -182,7 +182,7 @@ class SquareRootUKF:
             alpha: float = _config.DEFAULT_ALPHA,
             beta: float =  _config.DEFAULT_BETA,
             kappa: float = _config.DEFAULT_KAPPA,
-            lim_filter: int = _config.LIMIT_FILT,
+            lim_filter: int = _config.DEFAULT_LIM,
             dim_x: int = 6,
             pred_states: List[np.ndarray] = [],
             pred_covs: List[np.ndarray] = [],
@@ -327,7 +327,7 @@ class SquareRootUKF:
 
         _, R = np.linalg.qr(QR_matrix.T)
         SR_predict = self.cholupdate(R, traj.transform_points[0] - pred_state, self.w_cov[0])
-
+        #print(np.sqrt((SR_predict.T @ SR_predict).diagonal()))
         return pred_state, SR_predict, traj
 
     def correction(self, z: pd.Series, pred_state: np.ndarray,
@@ -357,7 +357,7 @@ class SquareRootUKF:
         self.all_transform_points.append(traj.transform_points)
 
         calc_meas = a_priori_meas - res_meas
-        print(f'res SRUKF = {res_meas[0][0] / _SEC2RAD}, {res_meas[0][1] / _SEC2RAD}')
+        #print(f'res SRUKF = {res_meas[0][0] / _SEC2RAD}, {res_meas[0][1] / _SEC2RAD}')
 
 
         # 5. Вычисляем предсказанную оценку по измерениям и предсказанный
@@ -403,21 +403,22 @@ class SquareRootUKF:
 
         #U = Kalman_gain @ S_meas
         #S_new = SR_predict.copy()
+        print((SR_predict.T @ SR_predict)[:3, :3])
         P_new = SR_predict.T @ SR_predict - Kalman_gain @ S_meas.T @ S_meas @ Kalman_gain.T
         #print(f'P = {P_new[:3,:3]}')
         #for i in range(U.shape[1]):
         #    S_new = self.cholupdate(S_new, U[:, 0], -1.0)
-        self.state_v = pred_state + Kalman_gain @ res_z
-
         try:
             self.SR_cov = scipy.linalg.cholesky(P_new)
-            #print(scipy.linalg.cholesky(P_new)[:3, :3])
         except np.linalg.LinAlgError as e:
-            self.SR_cov = SR_predict
-            print(f'Ошибка: {e}')
-            return
+            k = 0.8 * np.linalg.norm(P_new.diagonal())
+            P_new +=  k * np.eye(6)
+            self.SR_cov = scipy.linalg.cholesky(P_new)
+            print(f'Ошибка: {e}, регуляризация с k = {k}')
+            #return
+        self.state_v = pred_state + Kalman_gain @ res_z
         self.cov_matrix = self.SR_cov.T @ self.SR_cov
-
+        print(self.cov_matrix[:3 ,:3])
 
         # 10. Добавка в списки всей необходимой информации для 
         #     дальнейшего сглаживания оценки и построения графиков:
@@ -460,10 +461,25 @@ class SquareRootUKF:
             self.step(m, t_k)
             #print(f'state = {self.state_v}')
             #print(f'cov = {self.cov_matrix}')
-            print(f'Коррекция: {t_k}')
-            print('=' * 90)
+            #print(f'Коррекция: {t_k}')
+            #print('=' * 90)
 
-        return self.rts_smoother()
+        #return self.rts_smoother()
+
+    def several_filtrations(self, t0, P0):
+        i = 0
+        while i != self.lim_filter:
+            print(f'init state = {self.state_v}, {self.t_start}')
+            self.filtration()
+            orb = pyorbs.pyorbs.orbit()
+            orb.state_v = self.state_v
+            orb.time = pyorbs.pyorbs.ephem_time(self.meas.iloc[-1]['time'].to_pydatetime())
+            orb.setup_parameters()
+            orb.move(t0)
+            self.state_v, self.t_start = orb.state_v, t0
+            self.cov_matrix = P0
+            i+=1
+        #return vec
         
     def rts_smoother(self) -> tuple[np.ndarray, List[np.ndarray]]:
         """ Процесс сглаживания оценок вектора состояния и ковариационной
@@ -540,12 +556,12 @@ class LinearKalman:
 
     def prediction(self, t_k: pyorbs.pyorbs.ephem_time) -> tuple[np.ndarray, np.ndarray]:
 
-        num_orbits = 500
+        num_orbits = 450
         orb = pyorbs.pyorbs.orbit()
         orb.state_v, orb.time = self.state_v, self.t0
         orbits = np.random.multivariate_normal(orb.state_v, self.cov, num_orbits)
         samples = np.ndarray((6, num_orbits))
-
+        orb.move(t_k)
         for j in range(len(orbits)):
             transform_orbit = pyorbs.pyorbs.orbit()
             transform_orbit.state_v, transform_orbit.time = orbits[j], self.t0
@@ -553,37 +569,38 @@ class LinearKalman:
             transform_orbit.move(t_k)
             samples[:, j] = transform_orbit.state_v
 
-        mean = samples.mean(axis=1)
         P_pred = np.cov(samples)
-        
-        return mean, P_pred
+        mean = orb.state_v
+        #print(f'pred cov = {P_pred[:3, :3]}')
+
+        return mean, P_pred, orb
     
     def correction(self, z: pd.Series, mean: np.ndarray, 
-                        P_pred: np.ndarray, t_k: pyorbs.pyorbs.ephem_time) -> None:
+                        P_pred: np.ndarray, t_k: pyorbs.pyorbs.ephem_time, orb:pyorbs.pyorbs.orbit) -> None:
         
         m = pyorbs.pyorbs_det.Measurements(z.to_frame())
         step = pyorbs.pyorbs_det.newton_step(dim = 6, meas_tab = m.tracking)
-        orbit = pyorbs.pyorbs.orbit()
-        orbit.state_v, orbit.time = mean, t_k
-        m, mod_meas = pyorbs.pyorbs_det.process_meas_record(orbit, z, dim = 6, step = step)
+        m, mod_meas = pyorbs.pyorbs_det.process_meas_record(orb, z, dim = 6, step = step)
         res = m['res'][:, 0] * _SEC2RAD
-        print(f'res LKalman = {res / _SEC2RAD}')
+        #print(f'res LKalman = {res[0] / _SEC2RAD}, {res[1] / _SEC2RAD}')
         Kalman_gain = P_pred @ mod_meas.T @ np.linalg.inv(mod_meas @ P_pred @ mod_meas.T + self.cov_meas)
-        
+        print(P_pred[:3, :3])
         self.state_v = mean + Kalman_gain @ res.T
         self.cov = (np.eye(6) - Kalman_gain @ mod_meas) @ P_pred
-        #print(np.sqrt(np.diagonal(self.cov)))
+        print(self.cov[:3, :3])
+        #print(self.cov[:3, :3])
+        #print(np.sqrt(self.cov.diagonal()))
 
 
     def step(self, m: pd.Series, t_k: pyorbs.pyorbs.ephem_time) -> None:
-        mean, P = self.prediction(t_k)
-        self.correction(m, mean, P, t_k)
+        mean, P, orbit = self.prediction(t_k)
+        self.correction(m, mean, P, t_k, orbit)
 
     def filtration(self) -> None:
 
         for _, m in self.meas.iterrows():
             t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
             self.step(m, t_k)
-            print(f'Коррекция: {t_k}')
-            print('=' * 90)
+            #print(f'Коррекция: {t_k}')
+            #print('=' * 90)
 

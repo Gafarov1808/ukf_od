@@ -3,7 +3,7 @@ import pandas as pd
 from datetime import timedelta, datetime
 from sqlalchemy import select, cast, DateTime
 
-from models import SquareRootUKF, LinearKalman
+from models import LinearKalman, SquareRootUKF
 
 from kiamdb.orbits import OrbitSolution, SessionOrbits
 from kiamdb.od import ContextOD
@@ -38,35 +38,45 @@ def get_initial_params(obj: int, t_start: datetime) -> tuple[orbit, np.ndarray]:
     
     return init_orbit, P_initial
 
-def check_residuals(state: np.ndarray, meas: pd.DataFrame):
+def check_residuals(state: np.ndarray, meas: pd.DataFrame, t: ephem_time):
     orb = orbit()
-    orb.state_v, orb.time = state, ephem_time(meas.iloc[-1]['time'].to_pydatetime())
+    orb.state_v, orb.time = state, t # ephem_time(meas.iloc[0]['time'].to_pydatetime())
+    orb.setup_parameters()
     orb.change_param({'calc_partials': True})
     step = od_step(orb, meas)
     plot_res(step.meas_tab)
 
+def LSM(orb: orbit, ctx: ContextOD) -> None:
+    orb.setup_parameters()
+    orb.change_param({'calc_partials': True})
+    ctx.single_od()
+    plot_res(ctx.current_step.meas_tab)
+
 def main():
-    obj = 43109
-    t0 = datetime(2025, 12, 1)
+    obj = 43087 #43109
+    t0 = datetime(2026, 1, 1)
     t = t0 + timedelta(days = 28)
     orb, P0 = get_initial_params(obj, t0)
 
-    ctx = ContextOD(obj_id = obj, initial_orbit = orb, t_start = t0, t_stop = t, mle_limit = 1)
-    meas = ctx.meas_data.sort_values('time')
-    #ctx.single_od()
-    #plot_res(ctx.current_step.meas_tab)
+    print(f'correct state = {orb.state_v}')
     orb.state_v += np.array([sigma_pos, 0, 0, sigma_v, sigma_v, sigma_v])
+
+    ctx = ContextOD(obj_id = obj, initial_orbit = orb, t_start = t0, t_stop = t)
+    meas = ctx.meas_data.sort_values('time')
 
     P0 = np.zeros([6,6])
     P0[0,0] = sigma_pos ** 2
     P0[3,3] = P0[4, 4] = P0[5, 5] = sigma_v ** 2
     P0 += P_const
-    #filter = SquareRootUKF(t_start = orb.time, v = orb.state_v, P = P0, meas = meas)
-    filter = LinearKalman(t_start = orb.time, P = P0, v = orb.state_v, meas = meas)
-    _,_ = filter.filtration()
 
-    check_residuals(filter.state_v, meas)
-    #filter.draw_position_std(covs)
+    #LSM(orb, ctx)
+    filter = SquareRootUKF(t_start = orb.time, v = orb.state_v, 
+                                P = P0, meas = meas, lim_filter = 1)
+    filter.several_filtrations(orb.time, P0)
+    #filter = LinearKalman(t_start = orb.time, v = orb.state_v, P = P0, meas = meas)
+    #filter.filtration()
+
+    check_residuals(filter.state_v, meas, orb.time)
 
 if __name__ == "__main__":
     main()
