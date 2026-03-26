@@ -226,7 +226,7 @@ class UKF:
             self.state_v = v
             self.cov_process_matrix = _config.DEFAULT_COV_PROCESS
             self.cov_matrix_measure = R
-            self.alpha = alpha #_config.MAX_VAR / np.sqrt(dim_x) / np.max(np.sqrt(P.diagonal()))
+            self.alpha = alpha
             if self.alpha > 1. or self.alpha < 0.:
                 print(f'alpha = {self.alpha}. Завершение программы')
                 exit()
@@ -251,7 +251,6 @@ class UKF:
             self.lim_filter = lim_filter
             self.sigma = 0
 
-
     def set_weights(self) -> None:
         n_sigma = 2 * self.dim_x + 1
         self.w_mean = np.full(n_sigma, 1.0 / (2.0 * (float(self.dim_x) + self.par_lambda)))
@@ -260,7 +259,6 @@ class UKF:
         self.w_mean[0] = self.par_lambda / (self.dim_x + self.par_lambda)
         self.w_cov[0] = self.w_mean[0] + 1 - self.alpha ** 2 + self.beta
     
-
     def generate_sigma_points(self) -> np.ndarray:
         """ Создает массив, образующий окрестность вокруг
         вектора состояния.
@@ -272,7 +270,7 @@ class UKF:
         sigma_points = np.zeros((2 * self.dim_x + 1, self.dim_x))
         sigma_points[0] = self.state_v
 
-        sqrt_matrix = np.sqrt(self.dim_x + self.par_lambda) * self.SR_cov
+        sqrt_matrix = sqrt(self.dim_x + self.par_lambda) * self.SR_cov
         for i in range(self.dim_x):
             sigma_points[i+1] = self.state_v + sqrt_matrix[i,:]
             sigma_points[i+1+self.dim_x] = self.state_v - sqrt_matrix[i,:]
@@ -299,17 +297,6 @@ class UKF:
 
             return scipy.linalg.cholesky(P_new)
 
-    def update_parameters(self):
-        alpha_old = np.copy(self.alpha)
-        self.alpha = _config.MAX_VAR / np.sqrt(self.dim_x) / np.max(np.sqrt(self.cov_matrix.diagonal()))
-        print(self.alpha)
-        if self.alpha > 1 or self.alpha < 0.15:
-            self.alpha = alpha_old
-            print(f'alpha вышел за допустимые значения. Отмена обновления.')
-            return
-        self.par_lambda = self.alpha ** 2 * (self.dim_x + self.kappa) - self.dim_x
-        self.set_weights()
-
     def prediction(self, t_k: pyorbs.pyorbs.ephem_time) -> tuple[np.ndarray, np.ndarray, Trajectories]:
         """ Этап предсказания оценки и корня ковариационной матрицы.
 
@@ -323,25 +310,17 @@ class UKF:
             Набор предсказанной оценки и корня ковариационной матрицы и
             класс траекторий.
         """
-        
-        # 1. Создание сигма-точек и добавление их в общий список для 
-        #    дальнейшего анализа:
-        
+    
         self.sigma_points = self.generate_sigma_points()
         self.all_sigma_points.append(self.sigma_points)
-
-        # 2. Протягиваем сигма-точки по эволюции с помощью класса Trajectories:
         
-        traj = Trajectories(amount_points = 2 * self.dim_x + 1,
+        traj = Trajectories(amount_points = 13,
                             sigma_points = self.sigma_points,
                             t_start = self.t_start, t_k = t_k, measure = None)
         traj.get_transform_sigma_points()
-
-        # 3. Предсказываем оценку и корень ковариационной матрицы:
         
         pred_state = self.w_mean @ traj.transform_points
-        #print(traj.transform_points)
-        #print(f'pred state = {pred_state}')
+
         QR_matrix = np.zeros((self.dim_x, 2 * self.dim_x))
         for i in range (2 * self.dim_x):
             QR_matrix[:, i] = sqrt(self.w_cov[1]) * (traj.transform_points[i+1] - pred_state)
@@ -349,12 +328,11 @@ class UKF:
 
         _, R = np.linalg.qr(QR_matrix.T)
         SR_predict = self.cholupdate(R, traj.transform_points[0] - pred_state, self.w_cov[0])
-        #print('pred cov:')
-        #print((SR_predict.T @ SR_predict)[:3, :3])
+
         return pred_state, SR_predict, traj
 
     def correction(self, z: pd.Series, pred_state: np.ndarray,
-                    SR_predict: np.ndarray, t_k: pyorbs.pyorbs.ephem_time, traj: Trajectories) -> None:
+                    SR_pred: np.ndarray, t_k: pyorbs.pyorbs.ephem_time, traj: Trajectories) -> None:
         """ Этап коррекции оценки вектора состояния и корня ковариационной матрицы.
 
         Args:
@@ -370,24 +348,14 @@ class UKF:
 
         a_priori_meas = np.array(z['val'])
         state = pred_state.copy()
-        SR = SR_predict.copy()
-        #print(f'pred state = {pred_state}')
-        # 4. Возвращаем невязки по измерениям с помощью пакета
-        #    pyorbs и класса Trajectories и считаем посчитанные по модели
-        #    измерения:
+        SR = SR_pred.copy()
 
         traj.measure = z
         res_meas = traj.set_residuals()
         self.sigma += traj.sigma
         self.all_transform_points.append(traj.transform_points)
-        #print(self.alpha)
-        #print(f'tranform = {traj.transform_points[0]}')
         calc_meas = a_priori_meas - res_meas
         #print(f'res = {res_meas[0][0] / _SEC2RAD}, {res_meas[0][1] / _SEC2RAD}')
-        #print(self.alpha)
-
-        # 5. Вычисляем предсказанную оценку по измерениям и предсказанный
-        #    корень ковариационной матрицы с помощью алгоритма cholupdate:
         
         pred_meas = self.w_mean @ calc_meas
 
@@ -398,63 +366,32 @@ class UKF:
         _, R_meas = np.linalg.qr(QR_matrix.T)
         S_meas = self.cholupdate(R_meas, calc_meas[0] - pred_meas, self.w_cov[0])
 
-        # 6. Вычисляем перекрестную ковариацию:
-
-        diff_state = traj.transform_points - state
         diff_meas = calc_meas - pred_meas
+        diff_state = traj.transform_points - state
 
         Pyz = np.zeros((self.dim_x, 2))
         for i in range(2 * self.dim_x + 1):
             Pyz += self.w_cov[i] * diff_state[i,:].reshape(-1, 1) @ diff_meas[i,:].reshape(1, -1)
-        #print(f'Pyz = {Pyz}')
-        #print((np.linalg.inv(SR.T @ SR) @ Pyz).T)
 
-        # 7. Вычисляем матрицу усиления Kalman_gain
-        #    в случае неудачи, вычисляем псевдоопределенную матрицу:
+        K = Pyz @ np.linalg.inv(S_meas.T @ S_meas)
+        
+        self.state_v = state + K @ (a_priori_meas - pred_meas)
+        self.cov_matrix = SR.T @ SR - K @ S_meas.T @ S_meas @ K.T
 
         try:
-            Kalman_gain = Pyz @ np.linalg.inv(S_meas.T @ S_meas)
-        except np.linalg.LinAlgError:
-            Kalman_gain = Pyz @ np.linalg.pinv(S_meas.T @ S_meas)
-        #print(S_meas)
-        #print(Kalman_gain)
-        # 8. Вычисляем невязку по измерениям (разница 
-        #    между считанными наблюдениями и "среднему" по Калману
-        #    наблюдению):
-
-        res_z = a_priori_meas - pred_meas
-
-
-        # 9. Корректируем вектор состояния и корень ковариационной матрицы.
-        #    В случае неудачи обновления Холецкого для корня завершаем
-        #    шаг и переходим к следующему моменту времени:
-
-        P_new = SR.T @ SR - Kalman_gain @ S_meas.T @ S_meas @ Kalman_gain.T
-        #print(f'{(SR.T @ SR)[0,0]} - {(Kalman_gain @ S_meas.T @ S_meas @ Kalman_gain.T)[0,0]} = {P_new[0,0]}')
-        try:
-            self.SR_cov = scipy.linalg.cholesky(P_new)
+            self.SR_cov = scipy.linalg.cholesky(self.cov_matrix)
         except np.linalg.LinAlgError as e:
-            #k =  np.sqrt(self.alpha) * np.linalg.norm(P_new.diagonal())
-            #P_new += k * np.eye(6)
-            #self.SR_cov = scipy.linalg.cholesky(P_new)
-            #print(f'Ошибка: {e}, регуляризация с k = {k}')
             print(f'Ошибка: {e}. Пропуск шага.')
             return
         
-        self.state_v = state + Kalman_gain @ res_z
-        self.cov_matrix = self.SR_cov.T @ self.SR_cov
-
-        # 10. Добавка в списки всей необходимой информации для 
-        #     дальнейшего сглаживания оценки и построения графиков:
 
         self.pred_states.append(pred_state)
-        self.pred_covs.append(SR_predict.T @ SR_predict)
+        self.pred_covs.append(self.cov_matrix)
         self.forward_states.append(self.state_v)
         self.forward_sr_covs.append(self.SR_cov)
         self.forward_covs.append(self.cov_matrix)
         self.times.append(t_k.__str__())
         self.t_start = t_k
-
 
     def step(self, z: pd.Series, t_k: pyorbs.pyorbs.ephem_time) -> None:
         """ Шаг фильтрации:
@@ -466,12 +403,8 @@ class UKF:
             Уточненная оценка и ковариационная матрица.
         
         """
-        try:
-            pred_state, SR_predict, traj = self.prediction(t_k)
-            self.correction(z, pred_state, SR_predict, t_k, traj)
-        except pyorbs.exceptions.ReentryException as e:
-            print(f'Шаг фильтрации не удался: {e}')
-            self.t_start = t_k
+        pred_state, SR_predict, traj = self.prediction(t_k)
+        self.correction(z, pred_state, SR_predict, t_k, traj)
 
     def filtration(self) -> tuple[np.ndarray, List[np.ndarray]]:
         """Процесс фильтрации.
@@ -482,11 +415,6 @@ class UKF:
 
         for _, m in reversed(list(self.meas.iterrows())):
             t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
-            #if abs(self.t_start - t_k) * 1000 > 300:
-            #    alpha_old = self.alpha
-                #self.update_parameters()
-            #    print(f'Обновление параметра alpha: {alpha_old} --- {self.alpha}')
-                    
             self.step(m, t_k)
             #print(f'state = {self.state_v}')
             #print(f'cov = {self.cov_matrix[:3, :3]}')
@@ -511,11 +439,10 @@ class UKF:
             orb.setup_parameters()
             orb.move(t0)
             self.state_v, self.t_start = orb.state_v, t0
-            #print(self.state_v)
             self.cov_matrix = P0
             i+=1
-        #return vec
-        
+
+
     def rts_smoother(self) -> tuple[np.ndarray, List[np.ndarray]]:
         """ Процесс сглаживания оценок вектора состояния и ковариационной
             матрицы (Unscented Rauch-Tung-Striebel smoother for the additive
@@ -580,77 +507,82 @@ class LKF:
             t_start: pyorbs.pyorbs.ephem_time,
             v: np.ndarray,
             meas: pd.DataFrame,
-            R: np.ndarray = _config.R_DEFAULT):
+            R: np.ndarray = _config.R_DEFAULT,
+            Q: np.ndarray = _config.DEFAULT_COV_PROCESS,
+            lim_filter: int = _config.DEFAULT_LIM):
         
         self.cov = P
         self.t0 = t_start
         self.state_v = v
         self.meas = meas
         self.cov_meas = R
-
+        self.cov_process = Q
+        self.lim_filter = lim_filter
 
     def prediction(self, t_k: pyorbs.pyorbs.ephem_time) -> tuple[np.ndarray, np.ndarray]:
 
-        num_orbits = 800
-        orb = pyorbs.pyorbs.orbit()
-        orb.state_v, orb.time = self.state_v, self.t0
-        orbits = np.random.multivariate_normal(orb.state_v, self.cov, num_orbits)
-        samples = np.ndarray((6, num_orbits))
-        pyorbs.bal.uim_flushed()
-        orb.setup_parameters()
-        orb.move(t_k)
-        for j in range(len(orbits)):
-            pyorbs.bal.uim_flushed()
-            transform_orbit = pyorbs.pyorbs.orbit()
-            transform_orbit.state_v, transform_orbit.time = orbits[j], self.t0
-            transform_orbit.setup_parameters()
-            transform_orbit.move(t_k)
-            samples[:, j] = transform_orbit.state_v
-        P_pred = np.cov(samples)
-        mean = orb.state_v
-        self.t0 = t_k
-        #print(f'pred cov = {P_pred[:3, :3]}')
+        mean_orb = pyorbs.pyorbs.orbit()
+        mean_orb.state_v, mean_orb.time = self.state_v, self.t0
 
-        return mean, P_pred, orb
+        mean_orb.change_param({'calc_partials': True})
+        mean_orb.set_initial_point(self.t0)
+        mean_orb.setup_parameters()
+        mean_orb.move(t_k)
+
+        F = mean_orb.state_v[mean_orb.structure['calc_partials']].reshape(6,6)
+        
+        mean = F.T @ self.state_v
+        P_mean = F.T @ self.cov @ F + self.cov_process
+
+        return mean, P_mean, mean_orb
     
     def correction(self, z: pd.Series, center: np.ndarray, 
                         P_pred: np.ndarray, orb:pyorbs.pyorbs.orbit) -> None:
+        
+        a_priori_meas = np.array(z['val'])
         mean = center.copy()
+        P = P_pred.copy()
+
         m = pyorbs.pyorbs_det.Measurements(z.to_frame())
         step = pyorbs.pyorbs_det.newton_step(dim = 6, meas_tab = m.tracking)
-        m, H = pyorbs.pyorbs_det.process_meas_record(orb, z, dim = 6, step = step)
-        res = m['res'][:, 0] * _SEC2RAD
-        #print(f'pred state = {mean}')
+        _, H = pyorbs.pyorbs_det.process_meas_record(orb, z, dim = 6, step = step)
+        res = a_priori_meas - H @ mean
+
         print(f'res = {res[0] / _SEC2RAD}, {res[1] / _SEC2RAD}')
-        Kalman_gain = P_pred @ H.T @ np.linalg.inv(H @ P_pred @ H.T + self.cov_meas)
-        #print(f'mat = {scipy.linalg.cholesky(P_pred).T[:3, :3]}')
-        #print(H @ scipy.linalg.cholesky(P_pred).T)
-        #print(f'H = {H}')
-        #print(f'P * H^T = {P_pred @ H.T}')
-        #print(Kalman_gain)
-        #print('pred cov:')
-        #print(P_pred[:3, :3])
-        self.state_v = mean + Kalman_gain @ res.T
-        #print(f'state = {self.state_v}')
-        self.cov = (np.eye(6) - Kalman_gain @ H) @ P_pred
-        print(f'{P_pred[0,0]} - {(Kalman_gain @ H @ P_pred)[0,0]} = {self.cov[0,0]}')
+
+        K = P @ H.T @ np.linalg.inv(H @ P @ H.T + self.cov_meas)
+        self.state_v = mean + K @ res
+        print(self.state_v)
+        self.cov = (np.eye(6) - K @ H) @ P
         print('corr cov:')
         print(self.cov[:3, :3])
-        #print(np.sqrt(self.cov.diagonal()))
-
 
     def step(self, m: pd.Series, t_k: pyorbs.pyorbs.ephem_time) -> None:
         mean, P, orbit = self.prediction(t_k)
         self.correction(m, mean, P, orbit)
         print(f'Коррекция: {t_k.utc()}')
+        self.t0 = t_k
 
     def filtration(self) -> None:
 
-        for _, m in reversed(list(self.meas.iterrows())):
+        for _, m in self.meas.iterrows():
             t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
             self.step(m, t_k)
-            #print(f'Коррекция: {t_k}')
-            #print('=' * 90)
+        return self.state_v
+
+    def several_filtrations(self, t0, P0):
+        i = 0
+        while i != self.lim_filter:
+            print(f'Фильтрация... Попытка № {i+1}')
+            vec = self.filtration()
+            orb = pyorbs.pyorbs.orbit()
+            orb.state_v = vec
+            orb.time = pyorbs.pyorbs.ephem_time(self.meas.iloc[0]['time'].to_pydatetime())
+            orb.setup_parameters()
+            orb.move(t0)
+            self.state_v, self.t_start = orb.state_v, t0
+            self.cov_matrix = P0
+            i+=1
 
 
 class EKF:
@@ -660,13 +592,15 @@ class EKF:
             t_start: pyorbs.pyorbs.ephem_time,
             v: np.ndarray,
             meas: pd.DataFrame,
-            R: np.ndarray = _config.R_DEFAULT):
+            R: np.ndarray = _config.R_DEFAULT,
+            Q: np.ndarray = _config.DEFAULT_COV_PROCESS):
         
         self.cov = P
         self.t0 = t_start
         self.state_v = v
         self.meas = meas
         self.cov_meas = R
+        self.cov_process = Q
 
     def prediction(self, t_k):
         mean_orb = pyorbs.pyorbs.orbit()
@@ -679,13 +613,14 @@ class EKF:
 
         F = mean_orb.state_v[mean_orb.structure['calc_partials']].reshape(6,6)
         mean = mean_orb.state_v[:6]
-        P_mean = F.T @ self.cov @ F
+        P_mean = F.T @ self.cov @ F + self.cov_process
 
         return mean, P_mean
 
     def correction(self, z, x_pred, P_pred, t_k):
         mean = x_pred.copy()
         P = P_pred.copy()
+
         orb = pyorbs.pyorbs.orbit()
         orb.state_v, orb.time = x_pred, t_k
 
@@ -705,6 +640,7 @@ class EKF:
         self.correction(z, x, P, t_k)
 
     def filtration(self):
+
         for _, m in reversed(list(self.meas.iterrows())):
             t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
             self.step(m, t_k)
