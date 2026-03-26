@@ -1,6 +1,6 @@
 import numpy as np
 
-DEFAULT_ALPHA = 0.6                   # Параметры, необходимые
+DEFAULT_ALPHA = 0.55                    # Параметры, необходимые
 DEFAULT_KAPPA = 0.0                     # в разложении Холесского
 
 DEFAULT_BETA = 2.0                      # Параметр, необходимый для

@@ -4,7 +4,7 @@ from datetime import timedelta, datetime
 from sqlalchemy import select, cast, DateTime
 from scipy.linalg import cholesky
 
-from models import SquareRootUKF
+from filters import UKF, EKF, LKF
 
 from kiamdb.orbits import OrbitSolution, SessionOrbits
 from kiamdb.od import ContextOD
@@ -39,9 +39,9 @@ def get_initial_params(obj: int, t_start: datetime) -> tuple[orbit, np.ndarray]:
     
     return init_orbit, P_initial
 
-def check_residuals(state: np.ndarray, meas: pd.DataFrame):
+def check_residuals(state: np.ndarray, meas: pd.DataFrame, t):
     orb = orbit()
-    orb.state_v, orb.time = state, ephem_time(meas.iloc[-1]['time'].to_pydatetime())
+    orb.state_v, orb.time = state, t#ephem_time(meas.iloc[0]['time'].to_pydatetime())
     orb.setup_parameters()
     orb.change_param({'calc_partials': True})
     step = od_step(orb, meas)
@@ -62,13 +62,6 @@ def main():
     ctx = ContextOD(obj_id = obj, initial_orbit = orb, t_start = t0, t_stop = t)
     meas = ctx.meas_data.sort_values('time')
 
-    #mean = orbit()
-    #mean.state_v, mean.time = orb.state_v, orb.time
-    #mean.setup_parameters()
-    #t_last = ephem_time(meas.iloc[-1]['time'].to_pydatetime())
-    #mean.move(t_last)
-    #vec2 = mean.state_v
-
     print(f'initial state = {orb.state_v}, time = {orb.time.utc()}')
     orb.state_v += np.array([sigma_pos, 0, 0, sigma_v, sigma_v, sigma_v])
     v0 = orb.state_v.copy()
@@ -78,15 +71,14 @@ def main():
     P0[3,3] = P0[4, 4] = P0[5, 5] = sigma_v ** 2
     P0 += P_const
 
-    filter = SquareRootUKF(t_start = orb.time, v = v0, P = P0, meas = meas, lim_filter = 4)
-    #state = filter.filtration()
-    state = filter.several_filtrations(orb.time, P0)
-    vec2 = np.array([-3.83111599e+01,  1.83552647e+01 , 1.24750642e+00,-1.32192667e+00, -2.76204408e+00, 3.34497178e-02])
-    dv = state - vec2
-    mat = pyorbs.bal.to_rnb_mat(vec2)
-    print(f'{mat @ dv[:3] * 1e3} км')
-    
-    check_residuals(state, meas)
+    ukf = UKF(t_start = orb.time, v = v0, P = P0, meas = meas, lim_filter = 1)
+    ukf.several_filtrations(orb.time, P0)
+    #vec2 = np.array([-3.83111599e+01,  1.83552647e+01 , 1.24750642e+00,-1.32192667e+00, -2.76204408e+00, 3.34497178e-02])
+    #dv = state - vec2
+    #mat = pyorbs.bal.to_rnb_mat(vec2)
+    #print(f'{mat @ dv[:3] * 1e3} км')
+
+    check_residuals(ukf.state_v, meas, orb.time)
 
 if __name__ == "__main__":
     main()
