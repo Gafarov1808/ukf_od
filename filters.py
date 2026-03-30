@@ -523,6 +523,7 @@ class LKF:
 
         mean_orb = pyorbs.pyorbs.orbit()
         mean_orb.state_v, mean_orb.time = self.state_v, self.t0
+        mean_cur = self.state_v.copy()
 
         mean_orb.change_param({'calc_partials': True})
         mean_orb.set_initial_point(self.t0)
@@ -530,42 +531,38 @@ class LKF:
         mean_orb.move(t_k)
 
         F = mean_orb.state_v[mean_orb.structure['calc_partials']].reshape(6,6)
-        
-        mean = F.T @ self.state_v
+
+        #mean = F.T @ mean_cur
+        mean = mean_orb.state_v[:6].copy()
         P_mean = F.T @ self.cov @ F + self.cov_process
 
         return mean, P_mean, mean_orb
     
-    def correction(self, z: pd.Series, center: np.ndarray, 
-                        P_pred: np.ndarray, orb:pyorbs.pyorbs.orbit) -> None:
+    def correction(self, z: pd.Series, mean: np.ndarray, 
+                        P: np.ndarray, orb:pyorbs.pyorbs.orbit) -> None:
         
-        a_priori_meas = np.array(z['val'])
-        mean = center.copy()
-        P = P_pred.copy()
+        y = np.array(z['val'])
 
         m = pyorbs.pyorbs_det.Measurements(z.to_frame())
         step = pyorbs.pyorbs_det.newton_step(dim = 6, meas_tab = m.tracking)
+        orb.setup_parameters()
         _, H = pyorbs.pyorbs_det.process_meas_record(orb, z, dim = 6, step = step)
-        res = a_priori_meas - H @ mean
-
-        print(f'res = {res[0] / _SEC2RAD}, {res[1] / _SEC2RAD}')
 
         K = P @ H.T @ np.linalg.inv(H @ P @ H.T + self.cov_meas)
-        self.state_v = mean + K @ res
-        print(self.state_v)
+        self.state_v = mean + K @ (y - H @ mean)
         self.cov = (np.eye(6) - K @ H) @ P
-        print('corr cov:')
-        print(self.cov[:3, :3])
+        #print(self.cov[:3, :3])
 
     def step(self, m: pd.Series, t_k: pyorbs.pyorbs.ephem_time) -> None:
         mean, P, orbit = self.prediction(t_k)
         self.correction(m, mean, P, orbit)
-        print(f'Коррекция: {t_k.utc()}')
+        if self.lim_filter == 1:
+            print(f'Коррекция: {t_k.utc()}')
         self.t0 = t_k
 
     def filtration(self) -> None:
 
-        for _, m in self.meas.iterrows():
+        for _, m in reversed(list(self.meas.iterrows())):
             t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
             self.step(m, t_k)
         return self.state_v
