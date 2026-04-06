@@ -3,13 +3,44 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from typing import List
-from math import sqrt
 
 import pyorbs
 import _config
 
 _SEC2RAD = np.pi / 180. / 3600.
 
+def create_orbit(v: np.ndarray[np.float64], 
+                    t: pyorbs.pyorbs.ephem_time) -> pyorbs.pyorbs.orbit:
+    obj = pyorbs.pyorbs.orbit()
+    obj.state_v, obj.time = v, t
+    return obj
+
+def draw_position(times: List[str], 
+                    smoothed_covs: List[np.ndarray[np.float64]]):
+    """ Рисует графики отклонения по положению вектора состояния.
+    """
+    sigma_x = [np.sqrt(arr[0,0] * 1000) * 1000 for arr in smoothed_covs]
+    sigma_y = [np.sqrt(arr[1,1] * 1000) * 1000 for arr in smoothed_covs]
+    sigma_z = [np.sqrt(arr[2,2] * 1000) * 1000 for arr in smoothed_covs]
+    
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, sharex = True, figsize=(19,10)) # type: ignore
+    fig.suptitle('Отклонения положения (метры)', fontsize = 16) # type: ignore
+
+    ax1.plot(times, sigma_x, '+', label = 'Отклонение х')
+    ax1.set_ylabel('х')
+    ax1.grid(True)
+
+    ax2.plot(times, sigma_y, '+', label = 'Отклонение y')
+    ax2.set_ylabel('у')
+    ax2.grid(True)
+
+    ax3.plot(times, sigma_z, '+', label = 'Отклонение z')
+    ax3.set_ylabel('z')
+    ax3.set_xlabel('Время')
+    ax3.grid(True)
+
+    plt.tight_layout()
+    plt.show()
 
 class Trajectories:
     """ Класс, протягивающий траекторию по измерениям для каждой сигма точки.
@@ -65,8 +96,7 @@ class Trajectories:
         """ Протягивает облако сигма точек в заданный момент времени.
         """
         for i in range(self.N):
-            orb = pyorbs.pyorbs.orbit()
-            orb.state_v, orb.time = self.sigma_points[i], self.t0
+            orb = create_orbit(self.sigma_points[i], self.t0)
             orb.setup_parameters()
             orb.move(t_k)
             self.transform_points[i] = orb.state_v
@@ -86,7 +116,7 @@ class Trajectories:
                 meas = pyorbs.pyorbs_det.Measurements(self.measure.to_frame())
                 step = pyorbs.pyorbs_det.newton_step(dim = 6, meas_tab = meas.tracking)
                 m, _ = pyorbs.pyorbs_det.process_meas_record(orbit, self.measure, dim = 6, step = step)
-                if i == 0:  
+                if i == 0:
                     self.sigma = m['ds']
                 dz.append(m['res'][:, 0] * _SEC2RAD)
                 self.transform_points[i] = orbit.state_v #?
@@ -107,8 +137,11 @@ class UKF:
     #: Квадратный корень ковариационной матрицы
     SR_cov: np.ndarray[np.float64]
 
-    #: Время, с которого начинается фильтрация
+    #: Время t_k начала шага фильтрации
     t_start: pyorbs.pyorbs.ephem_time
+
+    #: Начальное время фильтрации
+    t_begin: pyorbs.pyorbs.ephem_time
 
     #: Вектор состояния
     state_v: np.ndarray[np.float64]
@@ -169,8 +202,11 @@ class UKF:
     #: Количество попыток фильтрации
     lim_filter: int
 
-    #: Общая невязка за одну фильтрацию
+    #: Сигма на одной попытке фильтрации
     sigma: float
+
+    #: Список сигм для каждой попытки фильтрации
+    sigma_list: List[float]
 
     #: Массив весов траекторий
     w_mean: np.ndarray[np.float64]
@@ -178,7 +214,7 @@ class UKF:
     def __init__(
             self, 
             P: np.ndarray[np.float64],
-            t_start: pyorbs.pyorbs.ephem_time,
+            t_begin: pyorbs.pyorbs.ephem_time,
             v: np.ndarray[np.float64],
             meas: pd.DataFrame,
             sigma_points: np.ndarray[np.float64] | None = None,
@@ -222,7 +258,8 @@ class UKF:
 
             """
             self.cov_matrix = P
-            self.t_start = t_start
+            self.t_start = t_begin
+            self.t_begin = t_begin
             self.state_v = v
             self.cov_process_matrix = Q
             self.cov_matrix_measure = R
@@ -249,6 +286,7 @@ class UKF:
             self.all_transform_points = all_transform_points
             self.meas = meas
             self.lim_filter = lim_filter
+            self.list_sigma = []
             self.sigma = 0
 
     def set_weights(self) -> None:
@@ -270,7 +308,7 @@ class UKF:
         sigma_points = np.zeros((2 * self.dim_x + 1, self.dim_x))
         sigma_points[0] = self.state_v
 
-        sqrt_matrix = sqrt(self.dim_x + self.par_lambda) * self.SR_cov
+        sqrt_matrix = np.sqrt(self.dim_x + self.par_lambda) * self.SR_cov
         for i in range(self.dim_x):
             sigma_points[i+1] = self.state_v + sqrt_matrix[i,:]
             sigma_points[i+1+self.dim_x] = self.state_v - sqrt_matrix[i,:]
@@ -281,9 +319,9 @@ class UKF:
                    x: np.ndarray[np.float64], alpha: float) -> np.ndarray[np.float64]:
 
         if alpha > 0:
-            P_new = R.T @ R + sqrt(alpha) * np.outer(x, x)
+            P_new = R.T @ R + np.sqrt(alpha) * np.outer(x, x)
         elif alpha < 0 and abs(alpha + 1.0) > 1e-6:
-            P_new = R.T @ R - sqrt(abs(alpha)) * np.outer(x, x)
+            P_new = R.T @ R - np.sqrt(abs(alpha)) * np.outer(x, x)
         else:
             P_new = R.T @ R - abs(alpha) * np.outer(x, x)
 
@@ -327,7 +365,7 @@ class UKF:
 
         QR_matrix = np.zeros((self.dim_x, 2 * self.dim_x))
         for i in range (2 * self.dim_x):
-            QR_matrix[:, i] = sqrt(self.w_cov[1]) * (traj.transform_points[i+1] - pred_state)
+            QR_matrix[:, i] = np.sqrt(self.w_cov[1]) * (traj.transform_points[i+1] - pred_state)
         QR_matrix = np.hstack([QR_matrix, scipy.linalg.cholesky(self.cov_process_matrix)])
 
         _, R = np.linalg.qr(QR_matrix.T)
@@ -367,7 +405,7 @@ class UKF:
 
         QR_matrix = np.zeros((2, 2 * self.dim_x))
         for i in range (2 * self.dim_x):
-            QR_matrix[:, i] = sqrt(self.w_cov[1]) * (calc_meas[i+1] - pred_meas)
+            QR_matrix[:, i] = np.sqrt(self.w_cov[1]) * (calc_meas[i+1] - pred_meas)
         QR_matrix = np.hstack([QR_matrix, scipy.linalg.cholesky(self.cov_matrix_measure)])
         _, R_meas = np.linalg.qr(QR_matrix.T)
         S_meas = self.cholupdate(R_meas, calc_meas[0] - pred_meas, self.w_cov[0])
@@ -390,12 +428,13 @@ class UKF:
             print(f'Ошибка: {e}. Пропуск шага.')
             return
 
-        self.pred_states.append(pred_state)
-        self.pred_covs.append(self.cov_matrix)
-        self.forward_states.append(self.state_v)
-        #self.forward_sr_covs.append(self.SR_cov)
-        self.forward_covs.append(self.cov_matrix)
-        self.times.append(t_k.__str__())
+        #self.pred_states.append(pred_state)
+        #self.pred_covs.append(self.cov_matrix)
+        #self.forward_states.append(self.state_v)
+        ##self.forward_sr_covs.append(self.SR_cov)
+        #self.forward_covs.append(self.cov_matrix)
+        #self.times.append(t_k.__str__())
+
 
     def step(self, z: pd.Series, t_k: pyorbs.pyorbs.ephem_time) -> None:
         """ Шаг фильтрации:
@@ -411,42 +450,42 @@ class UKF:
         self.correction(z, pred_state, SR_predict, t_k, traj)
         self.t_start = t_k
 
-    def filtration(self) -> np.ndarray[np.float64]:
+
+    def od_filtration(self) -> np.ndarray[np.float64] | None:
         """Процесс фильтрации.
 
         Returns:
             Сглаженный вектор состояния на последний момент времени и 
             список сглаженных ковариационных матриц"""
-
-        for _, m in reversed(list(self.meas.iterrows())):
-            t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
-            self.step(m, t_k)
-            #print(f'state = {self.state_v}')
-            #print(f'cov = {self.cov_matrix[:3, :3]}')
-            #print(np.sqrt(self.cov_matrix.diagonal()))
-            if self.lim_filter == 1:
-                print(f'Коррекция: {t_k.utc()}')
-            #print('=' * 90)
-
-        return self.state_v #self.rts_smoother()
-
-    def several_filtrations(self, t0: pyorbs.pyorbs.ephem_time, 
-                            P0: np.ndarray[np.float64]) -> None:
+        
         i = 0
         while i != self.lim_filter:
             print(f'Фильтрация... Попытка № {i+1}')
-            vec = self.filtration()
-            self.sigma = sqrt(self.sigma)
+
+            # Сама фильтрация (проход по моментам измерения в таблице)
+            for _, m in reversed(list(self.meas.iterrows())):
+                t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
+                self.step(m, t_k)
+
+            self.sigma = np.sqrt(self.sigma)
+            self.list_sigma.append(self.sigma)
+            #if (self.list_sigma[-1] - self.list_sigma[-2]) / self.list_sigma[-1] > _config.EPS_CONVERGE:
+            #    return
             print(f'sigma = {self.sigma}')
             self.sigma = 0
-            orb = pyorbs.pyorbs.orbit()
-            orb.state_v = vec
-            orb.time = pyorbs.pyorbs.ephem_time(self.meas.iloc[0]['time'].to_pydatetime())
+
+            orb = create_orbit(self.state_v.copy(), 
+                               pyorbs.pyorbs.ephem_time(self.meas.iloc[0]['time'].to_pydatetime()))
+            orb.change_param({'calc_partials': True})
+            orb.set_initial_point(orb.time)
             orb.setup_parameters()
-            orb.move(t0)
-            self.state_v, self.t_start = orb.state_v, t0
-            self.cov_matrix = P0
+            orb.move(self.t_begin)
+            F = orb.state_v[orb.structure['calc_partials']].reshape(6,6)
+            self.state_v, self.t_start = orb.state_v[:6], self.t_begin
+            self.cov_matrix = F.T @ self.cov_matrix @ F
+            
             i+=1
+
         
     def rts_smoother(self) -> tuple[np.ndarray[np.float64], List[np.ndarray[np.float64]]]:
         """ Процесс сглаживания оценки вектора состояния и ковариационной
@@ -478,32 +517,6 @@ class UKF:
         print(smoothed_states[0])
         return smoothed_states[-1], smoothed_covs
 
-    def draw_position_std(self, smoothed_covs: List[np.ndarray[np.float64]]):
-        """ Рисует график СКО по положению вектора состояния.
-        """
-        sigma_x = [sqrt(arr[0,0] * 1000) * 1000 for arr in smoothed_covs]
-        sigma_y = [sqrt(arr[1,1] * 1000) * 1000 for arr in smoothed_covs]
-        sigma_z = [sqrt(arr[2,2] * 1000) * 1000 for arr in smoothed_covs]
-        
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, sharex = True, figsize=(19,10)) # type: ignore
-        fig.suptitle('СКО положения (метры)', fontsize = 16) # type: ignore
-
-        ax1.plot(self.times, sigma_x, '+', label = 'СКО х')
-        ax1.set_ylabel('х')
-        ax1.grid(True)
-
-        ax2.plot(self.times, sigma_y, '+', label = 'СКО y')
-        ax2.set_ylabel('у')
-        ax2.grid(True)
-
-        ax3.plot(self.times, sigma_z, '+', label = 'СКО z')
-        ax3.set_ylabel('z')
-        ax3.set_xlabel('Время')
-        ax3.grid(True)
-
-        plt.tight_layout()
-        plt.show()
-
 
 class LKF:
     
@@ -532,8 +545,7 @@ class LKF:
     def prediction(self, t_k: pyorbs.pyorbs.ephem_time
                    ) -> tuple[np.ndarray[np.float64], np.ndarray[np.float64]]:
 
-        mean_orb = pyorbs.pyorbs.orbit()
-        mean_orb.state_v, mean_orb.time = self.state_v, self.t0
+        mean_orb = create_orbit(self.state_v, self.t0)
         mean_cur = self.state_v.copy()
 
         mean_orb.change_param({'calc_partials': True})
@@ -553,8 +565,7 @@ class LKF:
                         P: np.ndarray[np.float64], t_k: pyorbs.pyorbs.ephem_time) -> None:
         
         y = np.array(z['val'])
-        orb = pyorbs.pyorbs.orbit()
-        orb.state_v, orb.time = mean.copy(), t_k
+        orb = create_orbit(mean.copy(), t_k)
         m = pyorbs.pyorbs_det.Measurements(z.to_frame())
         step = pyorbs.pyorbs_det.newton_step(dim = 6, meas_tab = m.tracking)
         orb.setup_parameters()
@@ -585,9 +596,7 @@ class LKF:
         while i != self.lim_filter:
             print(f'Фильтрация... Попытка № {i+1}')
             vec = self.filtration()
-            orb = pyorbs.pyorbs.orbit()
-            orb.state_v = vec
-            orb.time = pyorbs.pyorbs.ephem_time(self.meas.iloc[0]['time'].to_pydatetime())
+            orb = create_orbit(vec, pyorbs.pyorbs.ephem_time(self.meas.iloc[0]['time'].to_pydatetime()))
             orb.setup_parameters()
             orb.move(t0)
             self.state_v, self.t_start = orb.state_v, t0
@@ -628,11 +637,9 @@ class EKF:
 
     def prediction(self, t_k: pyorbs.pyorbs.ephem_time
                    ) -> tuple[np.ndarray[np.float64], np.ndarray[np.float64]]:
-        mean_orb = pyorbs.pyorbs.orbit()
-        mean_orb.state_v, mean_orb.time = self.state_v, self.t0
-
+        mean_orb = create_orbit(self.state_v, self.t0)
         mean_orb.change_param({'calc_partials': True})
-        mean_orb.set_initial_point(self.t0)
+        mean_orb.set_initial_point(mean_orb.time)
         mean_orb.setup_parameters()
         mean_orb.move(t_k)
 
@@ -647,8 +654,7 @@ class EKF:
         mean = x_pred.copy()
         P = P_pred.copy()
 
-        orb = pyorbs.pyorbs.orbit()
-        orb.state_v, orb.time = x_pred, t_k
+        orb = create_orbit(x_pred, t_k)
 
         m = pyorbs.pyorbs_det.Measurements(z.to_frame())
         step = pyorbs.pyorbs_det.newton_step(dim = 6, meas_tab = m.tracking)
@@ -659,29 +665,24 @@ class EKF:
 
         self.state_v = mean + K @ res
         self.cov = (np.eye(6) - K @ H) @ P
-        self.t0 = t_k
 
     def step(self, z: pd.Series, t_k: pyorbs.pyorbs.ephem_time):
         x, P = self.prediction(t_k)
         self.correction(z, x, P, t_k)
+        self.t0 = t_k
 
     def filtration(self):
         for _, m in reversed(list(self.meas.iterrows())):
             t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
             self.step(m, t_k)
-            print(f'Коррекция: {t_k}')
-        
-        return self.state_v
 
     def several_filtrations(self, t0: pyorbs.pyorbs.ephem_time, 
                             P0: np.ndarray[np.float64]) -> None:
         i = 0
         while i != self.lim_filter:
             print(f'Фильтрация... Попытка № {i+1}')
-            vec = self.filtration()
-            orb = pyorbs.pyorbs.orbit()
-            orb.state_v = vec
-            orb.time = pyorbs.pyorbs.ephem_time(self.meas.iloc[0]['time'].to_pydatetime())
+            self.filtration()
+            orb = create_orbit(self.state_v.copy(), pyorbs.pyorbs.ephem_time(self.meas.iloc[0]['time'].to_pydatetime()))
             orb.setup_parameters()
             orb.move(t0)
             self.state_v, self.t_start = orb.state_v, t0
