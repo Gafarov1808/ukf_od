@@ -200,7 +200,7 @@ class UKF:
     meas: pd.DataFrame
 
     #: Количество попыток фильтрации
-    lim_filter: int
+    attempt: int
 
     #: Сигма на одной попытке фильтрации
     sigma: float
@@ -223,7 +223,7 @@ class UKF:
             alpha: float = _config.DEFAULT_ALPHA,
             beta: float =  _config.DEFAULT_BETA,
             kappa: float = _config.DEFAULT_KAPPA,
-            lim_filter: int = _config.DEFAULT_LIM,
+            attempts: int = _config.DEFAULT_ATTEMPT,
             dim_x: int = 6,
             pred_states: List[np.ndarray[np.float64]] = [],
             pred_covs: List[np.ndarray[np.float64]] = [],
@@ -285,7 +285,7 @@ class UKF:
             self.sigma_points = sigma_points
             self.all_transform_points = all_transform_points
             self.meas = meas
-            self.lim_filter = lim_filter
+            self.attempts = attempts
             self.list_sigma = []
             self.sigma = 0
 
@@ -459,9 +459,10 @@ class UKF:
             список сглаженных ковариационных матриц"""
         
         i = 0
-        while i != self.lim_filter:
+        while i != self.attempts:
+            print(f'sigma = {self.sigma}')
             print(f'Фильтрация... Попытка № {i+1}')
-
+            self.sigma = 0
             # Сама фильтрация (проход по моментам измерения в таблице)
             for _, m in reversed(list(self.meas.iterrows())):
                 t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
@@ -469,24 +470,31 @@ class UKF:
 
             self.sigma = np.sqrt(self.sigma)
             self.list_sigma.append(self.sigma)
-            #if (self.list_sigma[-1] - self.list_sigma[-2]) / self.list_sigma[-1] > _config.EPS_CONVERGE:
-            #    return
-            print(f'sigma = {self.sigma}')
-            self.sigma = 0
-
-            orb = create_orbit(self.state_v.copy(), 
-                               pyorbs.pyorbs.ephem_time(self.meas.iloc[0]['time'].to_pydatetime()))
-            orb.change_param({'calc_partials': True})
-            orb.set_initial_point(orb.time)
-            orb.setup_parameters()
-            orb.move(self.t_begin)
-            F = orb.state_v[orb.structure['calc_partials']].reshape(6,6)
-            self.state_v, self.t_start = orb.state_v[:6], self.t_begin
-            self.cov_matrix = F.T @ self.cov_matrix @ F
             
-            i+=1
+            if self.sigma < _config.GOOD_SIGMA:
+                self.get_init_orbit()
+                break
+            elif (i > 1
+                and abs((self.list_sigma[-1] - self.list_sigma[-2]) / self.list_sigma[-1]) < _config.EPS_CONVERGE
+                and abs((self.list_sigma[-2] - self.list_sigma[-3]) / self.list_sigma[-2]) < _config.EPS_CONVERGE):
+                self.get_init_orbit()
+                break
+            else:
+                self.get_init_orbit()
+                self.attempts +=1
+                i+=1
 
-        
+
+    def get_init_orbit(self):
+        orb = create_orbit(self.state_v.copy(), pyorbs.pyorbs.ephem_time(self.meas.iloc[0]['time'].to_pydatetime()))
+        orb.change_param({'calc_partials': True})
+        orb.set_initial_point(orb.time)
+        orb.setup_parameters()
+        orb.move(self.t_begin)
+        F = orb.state_v[orb.structure['calc_partials']].reshape(6,6)
+        self.state_v, self.t_start = orb.state_v[:6].copy(), self.t_begin
+        self.cov_matrix = F.T @ self.cov_matrix @ F
+      
     def rts_smoother(self) -> tuple[np.ndarray[np.float64], List[np.ndarray[np.float64]]]:
         """ Процесс сглаживания оценки вектора состояния и ковариационной
             матрицы (Unscented Rauch-Tung-Striebel smoother for the additive
@@ -532,7 +540,7 @@ class LKF:
                  meas: pd.DataFrame,
                  R: np.ndarray[np.float64] = _config.R_DEFAULT,
                  Q: np.ndarray[np.float64] = _config.DEF_COV_PROC,
-                 lim_filter: int = _config.DEFAULT_LIM):
+                 attempts: int = _config.DEFAULT_ATTEMPT):
         
         self.cov = P
         self.t0 = t_start
@@ -540,7 +548,7 @@ class LKF:
         self.meas = meas
         self.cov_meas = R
         self.cov_process = Q
-        self.lim_filter = lim_filter
+        self.attempts = attempts
 
     def prediction(self, t_k: pyorbs.pyorbs.ephem_time
                    ) -> tuple[np.ndarray[np.float64], np.ndarray[np.float64]]:
@@ -559,49 +567,47 @@ class LKF:
         #mean = mean_orb.state_v[:6].copy()
         cov_mean = F.T @ self.cov @ F + self.cov_process
 
-        return mean, cov_mean
+        return mean, cov_mean, F.T
     
     def correction(self, z: pd.Series, mean: np.ndarray[np.float64], 
-                        P: np.ndarray[np.float64], t_k: pyorbs.pyorbs.ephem_time) -> None:
+                        P: np.ndarray[np.float64], t_k: pyorbs.pyorbs.ephem_time, 
+                        F: np.ndarray[np.float64]) -> None:
         
         y = np.array(z['val'])
         orb = create_orbit(mean.copy(), t_k)
         m = pyorbs.pyorbs_det.Measurements(z.to_frame())
         step = pyorbs.pyorbs_det.newton_step(dim = 6, meas_tab = m.tracking)
         orb.setup_parameters()
-        _, H = pyorbs.pyorbs_det.process_meas_record(orb, z, dim = 6, step = step)
+        _, dPsidX = pyorbs.pyorbs_det.process_meas_record(orb, z, dim = 6, step = step)
 
+        H = dPsidX @ F
         K = P @ H.T @ np.linalg.inv(H @ P @ H.T + self.cov_meas)
         self.state_v = mean + K @ (y - H @ mean)
         self.cov = (np.eye(6) - K @ H) @ P
         #print(self.cov[:3, :3])
 
     def step(self, m: pd.Series, t_k: pyorbs.pyorbs.ephem_time) -> None:
-        mean, P = self.prediction(t_k)
-        self.correction(m, mean, P, t_k)
-        if self.lim_filter == 1:
+        mean, P, F = self.prediction(t_k)
+        self.correction(m, mean, P, t_k, F)
+        if self.attempts == 1:
             print(f'Коррекция: {t_k.utc()}')
         self.t0 = t_k
 
-    def filtration(self) -> np.ndarray[np.float64]:
+    def od_filtration(self) -> np.ndarray[np.float64] | None:
+        """Процесс фильтрации.
 
-        for _, m in reversed(list(self.meas.iterrows())):
-            t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
-            self.step(m, t_k)
-        return self.state_v
-
-    def several_filtrations(self, t0: pyorbs.pyorbs.ephem_time, 
-                            P0:np.ndarray[np.float64]):
+        Returns:
+            Сглаженный вектор состояния на последний момент времени и 
+            список сглаженных ковариационных матриц"""
+        
         i = 0
-        while i != self.lim_filter:
+        while i != self.attempts:
             print(f'Фильтрация... Попытка № {i+1}')
-            vec = self.filtration()
-            orb = create_orbit(vec, pyorbs.pyorbs.ephem_time(self.meas.iloc[0]['time'].to_pydatetime()))
-            orb.setup_parameters()
-            orb.move(t0)
-            self.state_v, self.t_start = orb.state_v, t0
-            self.cov_matrix = P0
-            i+=1
+            # Сама фильтрация (проход по моментам измерения в таблице)
+            for _, m in reversed(list(self.meas.iterrows())):
+                t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
+                self.step(m, t_k)
+                
 
 
 class EKF:
@@ -616,7 +622,7 @@ class EKF:
 
     cov_process: np.ndarray[np.float64]
 
-    lim_filter: int
+    attempts: int
 
     def __init__(self,
             P: np.ndarray[np.float64],
@@ -625,7 +631,7 @@ class EKF:
             meas: pd.DataFrame,
             R: np.ndarray[np.float64] = _config.R_DEFAULT,
             Q: np.ndarray[np.float64] = _config.DEF_COV_PROC,
-            lim_filter: int = _config.DEFAULT_LIM):
+            attempts: int = _config.DEFAULT_ATTEMPT):
         
         self.cov = P
         self.t0 = t_start
@@ -633,7 +639,7 @@ class EKF:
         self.meas = meas
         self.cov_meas = R
         self.cov_process = Q
-        self.lim_filter = lim_filter
+        self.attempts = attempts
 
     def prediction(self, t_k: pyorbs.pyorbs.ephem_time
                    ) -> tuple[np.ndarray[np.float64], np.ndarray[np.float64]]:
@@ -679,7 +685,7 @@ class EKF:
     def several_filtrations(self, t0: pyorbs.pyorbs.ephem_time, 
                             P0: np.ndarray[np.float64]) -> None:
         i = 0
-        while i != self.lim_filter:
+        while i != self.attempts:
             print(f'Фильтрация... Попытка № {i+1}')
             self.filtration()
             orb = create_orbit(self.state_v.copy(), pyorbs.pyorbs.ephem_time(self.meas.iloc[0]['time'].to_pydatetime()))
