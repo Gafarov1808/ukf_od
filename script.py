@@ -3,12 +3,12 @@ import numpy as np, kiamdb, pyorbs
 from datetime import timedelta, datetime
 from sqlalchemy import select
 
-from filters import UKF, LKF
+from filters import UKF, LKF, EKF
 
 obj, t0 = 40258, datetime(2026, 2, 18)
 t = t0 + timedelta(days = 25)
 
-sigma_pos = 0.1
+sigma_pos = 0
 P_const = np.diag([1e-5, 1e-5, 1e-5, 1e-8, 1e-8, 1e-8])
 
 def get_initial_params():
@@ -42,8 +42,8 @@ def main():
     P0 = np.zeros([6,6])
     P0[0,0] = sigma_pos ** 2
     P0 += P_const
-
-    filter = LKF(t_begin=t_start, v=v0, P=P0, meas=meas, attempts=4)
+    print(v0)
+    filter = LKF(t_begin=t_start, v=v0, P=P0, meas=meas, attempts=1)
     filter.od_filtration()
 
     #mat = pyorbs.bal.to_rnb_mat(vec2)

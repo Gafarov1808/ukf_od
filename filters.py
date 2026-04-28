@@ -42,6 +42,7 @@ def draw_position(times: List[str],
     plt.tight_layout()
     plt.show()
 
+
 class Trajectories:
     """ Класс, протягивающий траекторию по измерениям для каждой сигма точки.
     """
@@ -531,11 +532,12 @@ class LKF:
     #: Вектор состояния системы
     state_v: np.ndarray[np.float64]
 
+    #: Ковариационная матрица
     cov: np.ndarray[np.float64]
 
     def __init__(self,
                  P: np.ndarray[np.float64],
-                 t_start: pyorbs.pyorbs.ephem_time,
+                 t_begin: pyorbs.pyorbs.ephem_time,
                  v: np.ndarray[np.float64],
                  meas: pd.DataFrame,
                  R: np.ndarray[np.float64] = _config.R_DEFAULT,
@@ -543,28 +545,30 @@ class LKF:
                  attempts: int = _config.DEFAULT_ATTEMPT):
         
         self.cov = P
-        self.t0 = t_start
+        self.t_begin = t_begin
+        self.t_start = t_begin
         self.state_v = v
         self.meas = meas
         self.cov_meas = R
         self.cov_process = Q
+        
         self.attempts = attempts
 
     def prediction(self, t_k: pyorbs.pyorbs.ephem_time
                    ) -> tuple[np.ndarray[np.float64], np.ndarray[np.float64]]:
 
-        mean_orb = create_orbit(self.state_v, self.t0)
+        mean_orb = create_orbit(self.state_v.copy(), self.t_start)
         mean_cur = self.state_v.copy()
 
         mean_orb.change_param({'calc_partials': True})
-        mean_orb.set_initial_point(self.t0)
+        mean_orb.set_initial_point(self.t_start)
         mean_orb.setup_parameters()
         mean_orb.move(t_k)
 
-        F = mean_orb.state_v[mean_orb.structure['calc_partials']].reshape(6,6)
+        F = mean_orb.state_v[mean_orb.structure['calc_partials']].reshape(6,6).copy()
 
         mean = F.T @ mean_cur
-        #mean = mean_orb.state_v[:6].copy()
+        print(mean)
         cov_mean = F.T @ self.cov @ F + self.cov_process
 
         return mean, cov_mean, F.T
@@ -583,15 +587,27 @@ class LKF:
         H = dPsidX @ F
         K = P @ H.T @ np.linalg.inv(H @ P @ H.T + self.cov_meas)
         self.state_v = mean + K @ (y - H @ mean)
+        #print((y - H @ mean) / _SEC2RAD)
         self.cov = (np.eye(6) - K @ H) @ P
-        #print(self.cov[:3, :3])
 
     def step(self, m: pd.Series, t_k: pyorbs.pyorbs.ephem_time) -> None:
         mean, P, F = self.prediction(t_k)
         self.correction(m, mean, P, t_k, F)
-        if self.attempts == 1:
-            print(f'Коррекция: {t_k.utc()}')
-        self.t0 = t_k
+        #if self.attempts == 1:
+            #print(self.state_v)
+            #print(f'Коррекция: {t_k.utc()}')
+        self.t_start = t_k
+
+    def get_init_orbit(self):
+
+        orb = create_orbit(self.state_v.copy(), pyorbs.pyorbs.ephem_time(self.meas.iloc[0]['time'].to_pydatetime()))
+        orb.change_param({'calc_partials': True})
+        orb.set_initial_point(orb.time)
+        orb.setup_parameters()
+        orb.move(self.t_begin)
+        F = orb.state_v[orb.structure['calc_partials']].reshape(6,6).copy()
+        self.state_v, self.t_start = orb.state_v[:6].copy(), self.t_begin
+        self.cov = F.T @ self.cov @ F
 
     def od_filtration(self) -> np.ndarray[np.float64] | None:
         """Процесс фильтрации.
@@ -603,11 +619,14 @@ class LKF:
         i = 0
         while i != self.attempts:
             print(f'Фильтрация... Попытка № {i+1}')
-            # Сама фильтрация (проход по моментам измерения в таблице)
-            for _, m in reversed(list(self.meas.iterrows())):
+
+            for k, m in reversed(list(self.meas.iterrows())):
                 t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
+                if k == 1:
+                    print(self.state_v)
                 self.step(m, t_k)
-                
+            self.get_init_orbit()
+            i+=1
 
 
 class EKF:
@@ -626,7 +645,7 @@ class EKF:
 
     def __init__(self,
             P: np.ndarray[np.float64],
-            t_start: pyorbs.pyorbs.ephem_time,
+            t_begin: pyorbs.pyorbs.ephem_time,
             v: np.ndarray[np.float64],
             meas: pd.DataFrame,
             R: np.ndarray[np.float64] = _config.R_DEFAULT,
@@ -634,7 +653,8 @@ class EKF:
             attempts: int = _config.DEFAULT_ATTEMPT):
         
         self.cov = P
-        self.t0 = t_start
+        self.t0 = t_begin
+        self.t_begin = t_begin
         self.state_v = v
         self.meas = meas
         self.cov_meas = R
@@ -653,10 +673,10 @@ class EKF:
         mean = mean_orb.state_v[:6]
         P_mean = F.T @ self.cov @ F + self.cov_process
 
-        return mean, P_mean
+        return mean, P_mean, F.T.copy()
 
     def correction(self, z: pd.Series, x_pred: np.ndarray[np.float64], 
-                   P_pred: np.ndarray[np.float64], t_k: pyorbs.pyorbs.ephem_time):
+                   P_pred: np.ndarray[np.float64], t_k: pyorbs.pyorbs.ephem_time, F):
         mean = x_pred.copy()
         P = P_pred.copy()
 
@@ -664,8 +684,10 @@ class EKF:
 
         m = pyorbs.pyorbs_det.Measurements(z.to_frame())
         step = pyorbs.pyorbs_det.newton_step(dim = 6, meas_tab = m.tracking)
-        m, H = pyorbs.pyorbs_det.process_meas_record(orb, z, dim = 6, step = step)
+        m, dPsidX = pyorbs.pyorbs_det.process_meas_record(orb, z, dim = 6, step = step)
+        H = dPsidX @ F
         res = m['res'][:, 0] * _SEC2RAD
+        #print(res / _SEC2RAD)
         S: np.ndarray[np.float64] = H @ P @ H.T + self.cov_meas
         K = P @ H.T @ np.linalg.inv(S)
 
@@ -673,24 +695,35 @@ class EKF:
         self.cov = (np.eye(6) - K @ H) @ P
 
     def step(self, z: pd.Series, t_k: pyorbs.pyorbs.ephem_time):
-        x, P = self.prediction(t_k)
-        self.correction(z, x, P, t_k)
+        x, P, F = self.prediction(t_k)
+        self.correction(z, x, P, t_k, F)
         self.t0 = t_k
 
-    def filtration(self):
-        for _, m in reversed(list(self.meas.iterrows())):
-            t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
-            self.step(m, t_k)
+    def get_init_orbit(self):
 
-    def several_filtrations(self, t0: pyorbs.pyorbs.ephem_time, 
-                            P0: np.ndarray[np.float64]) -> None:
+        orb = create_orbit(self.state_v.copy(), pyorbs.pyorbs.ephem_time(self.meas.iloc[0]['time'].to_pydatetime()))
+        orb.change_param({'calc_partials': True})
+        orb.set_initial_point(orb.time)
+        orb.setup_parameters()
+        orb.move(self.t_begin)
+        F = orb.state_v[orb.structure['calc_partials']].reshape(6,6).copy()
+        self.state_v, self.t0 = orb.state_v[:6].copy(), self.t_begin
+        print(f'на правый момент {self.state_v}')
+        self.cov = F.T @ self.cov @ F
+
+    def od_filtration(self) -> np.ndarray[np.float64] | None:
+        """Процесс фильтрации.
+
+        Returns:
+            Сглаженный вектор состояния на последний момент времени и 
+            список сглаженных ковариационных матриц"""
+        
         i = 0
         while i != self.attempts:
             print(f'Фильтрация... Попытка № {i+1}')
-            self.filtration()
-            orb = create_orbit(self.state_v.copy(), pyorbs.pyorbs.ephem_time(self.meas.iloc[0]['time'].to_pydatetime()))
-            orb.setup_parameters()
-            orb.move(t0)
-            self.state_v, self.t_start = orb.state_v, t0
-            self.cov_matrix = P0
+            # Сама фильтрация (проход по моментам измерения в таблице)
+            for _, m in reversed(list(self.meas.iterrows())):
+                t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
+                self.step(m, t_k)
+            self.get_init_orbit()
             i+=1
