@@ -5,8 +5,8 @@ from sqlalchemy import select
 
 from filters import UKF, LKF, EKF
 
-obj, t0 = 40258, datetime(2026, 2, 18)
-t = t0 + timedelta(days = 25)
+obj, t0 = 40258, datetime(2026, 3, 10)
+t = t0 + timedelta(days = 5)
 
 sigma_pos = 0
 P_const = np.diag([1e-5, 1e-5, 1e-5, 1e-8, 1e-8, 1e-8])
@@ -43,7 +43,7 @@ def main():
     P0[0,0] = sigma_pos ** 2
     P0 += P_const
     print(v0)
-    filter = LKF(t_begin=t_start, v=v0, P=P0, meas=meas, attempts=1)
+    filter = LKF(t_begin=t_start, v=v0, P=P0, meas=meas, attempts=3)
     filter.od_filtration()
 
     #mat = pyorbs.bal.to_rnb_mat(vec2)
