@@ -611,6 +611,7 @@ class LKF:
         self.cov = F.T @ self.cov @ F
         self.mean_orb = create_orbit(self.v0, self.t_begin)
         self.mean_orb.change_param({'calc_partials': True})
+        self.mean_orb.setup_parameters()
 
     def od_filtration(self) -> np.ndarray | None:
         """Процесс фильтрации.
@@ -627,7 +628,7 @@ class LKF:
                 t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
                 self.step(m, t_k)
             #print(self.x_hat)
-            self.state_v += self.x_hat
+            self.state_v = self.mean_orb.state_v[:6] + self.x_hat
             self.x_hat = np.zeros((6, ))
             self.dXlastdX0 = np.zeros((6,6))
             self.get_init_orbit()
