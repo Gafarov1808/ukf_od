@@ -543,7 +543,6 @@ class LKF:
         self.t_begin = t_begin
         self.t_start = t_begin
         self.state_v = v
-        self.v0 = self.state_v.copy()
         self.meas = meas
         self.cov_meas = R
         self.cov_process = Q
@@ -559,80 +558,56 @@ class LKF:
         self.mean_orb.set_initial_point(self.t_start)
         self.mean_orb.move(t_k)
 
-        dXkdXlast = self.mean_orb.state_v[self.mean_orb.structure['calc_partials']].reshape(6,6).T.copy()
+        dXkdXlast = self.mean_orb.state_v[6:].reshape(6,6).T.copy()
         if np.all(self.dXlastdX0 == 0):
-            self.dXkdX0 = dXkdXlast
+            self.dXkdX0 = dXkdXlast.copy()
         else:
-            self.dXkdX0 = dXkdXlast @ self.dXlastdX0
-        self.dXlastdX0 = self.dXkdX0
+            self.dXkdX0 = dXkdXlast.copy() @ self.dXlastdX0.copy()
+        self.dXlastdX0 = self.dXkdX0.copy()
 
-    def prediction(self, t_k: pyorbs.pyorbs.ephem_time) -> tuple[np.ndarray, np.ndarray]:
+    def step(self, z: pd.Series, t_k: pyorbs.pyorbs.ephem_time):
 
         self.calc_partials(t_k)
         Fi = self.dXkdX0 @ np.linalg.inv(self.dXlastdX0)
 
-        mean = Fi @ self.x_hat
-        cov_mean = Fi @ self.cov @ Fi.T + self.cov_process
-
-        return mean, cov_mean
-
-    def correction(self, z: pd.Series, x: np.ndarray, P: np.ndarray, t_k: pyorbs.pyorbs.ephem_time) -> None:
+        x = Fi @ self.x_hat
+        P = Fi @ self.cov @ Fi.T + self.cov_process
         
-        #y = np.array(z['val'])
-        orb = create_orbit(self.mean_orb.state_v[:6].copy(), t_k)
         m = pyorbs.pyorbs_det.Measurements(z.to_frame())
-        step = pyorbs.pyorbs_det.newton_step(dim = 6, meas_tab = m.tracking)
-        orb.setup_parameters()
-        l, dPsidXk = pyorbs.pyorbs_det.process_meas_record(orb, z, dim = 6, step = step)
-        y = l['res'].reshape(2,)
+        step = pyorbs.pyorbs_det.newton_step(dim = 42, meas_tab = m.tracking)
 
-        H = dPsidXk @ self.dXkdX0
+        l, H = pyorbs.pyorbs_det.process_meas_record(self.mean_orb, z, dim = 42, step = step)
+        y = l['res'].reshape(2,) * _SEC2RAD
+
         K = P @ H.T @ np.linalg.inv(H @ P @ H.T + self.cov_meas)
 
         self.x_hat = x + K @ (y - H @ x)
-        #print((y - H @ x) / _SEC2RAD)
         self.cov = P - K @ H @ P
-
-    def step(self, m: pd.Series, t_k: pyorbs.pyorbs.ephem_time) -> None:
-        dx, P = self.prediction(t_k)
-        self.correction(m, dx, P, t_k)
-        self.t_start = t_k
 
     def get_init_orbit(self):
 
-        orb = create_orbit(self.state_v.copy(), pyorbs.pyorbs.ephem_time(self.meas.iloc[0]['time'].to_pydatetime()))
-        orb.change_param({'calc_partials': True})
-        orb.set_initial_point(orb.time)
-        orb.setup_parameters()
-        orb.move(self.t_begin)
-        F = orb.state_v[orb.structure['calc_partials']].reshape(6,6).copy()
-        self.state_v, self.t_start = orb.state_v[:6].copy(), self.t_begin
-        print(self.state_v)
-        self.cov = F.T @ self.cov @ F
-        self.mean_orb = create_orbit(self.v0, self.t_begin)
-        self.mean_orb.change_param({'calc_partials': True})
+        self.mean_orb.move(self.t_begin)
+        #self.mean_orb.structure['calc_partials']
+        F = self.mean_orb.state_v[6:].reshape(6,6).T.copy()
+        self.t_start, self.cov = self.t_begin, F @ self.cov @ F.T
         self.mean_orb.setup_parameters()
 
-    def od_filtration(self) -> np.ndarray | None:
-        """Процесс фильтрации.
-
-        Returns:
-            Сглаженный вектор состояния на последний момент времени и 
-            список сглаженных ковариационных матриц"""
+    def od_filtration(self):
         
         i = 0
         while i != self.attempts:
-            print(f'Фильтрация... Попытка № {i+1}')
 
             for _, m in reversed(list(self.meas.iterrows())):
                 t_k = pyorbs.pyorbs.ephem_time(m['time'].to_pydatetime())
                 self.step(m, t_k)
-            #print(self.x_hat)
-            self.state_v = self.mean_orb.state_v[:6] + self.x_hat
-            self.x_hat = np.zeros((6, ))
-            self.dXlastdX0 = np.zeros((6,6))
+                self.t_start = t_k
+            print(self.x_hat)
+            self.mean_orb.state_v[:6] += self.x_hat
+            self.x_hat, self.dXlastdX0 = np.zeros((6, )), np.zeros((6, 6))
             self.get_init_orbit()
             i+=1
+        
+        self.state_v = self.mean_orb.state_v[:6]
 
 
 class EKF:
