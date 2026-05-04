@@ -2,7 +2,6 @@ import scipy
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from typing import List
 
 import pyorbs
 import _config
@@ -14,7 +13,7 @@ def create_orbit(v: np.ndarray, t: pyorbs.pyorbs.ephem_time) -> pyorbs.pyorbs.or
     obj.state_v, obj.time = v, t
     return obj
 
-def draw_position(times: List[str], smoothed_covs: List[np.ndarray]):
+def draw_position(times: list[str], smoothed_covs: list[np.ndarray]):
     """ Рисует графики отклонения по положению вектора состояния.
     """
     sigma_x = [np.sqrt(arr[0,0] * 1000) * 1000 for arr in smoothed_covs]
@@ -173,26 +172,26 @@ class UKF:
     sigma_points: np.ndarray | None = None
 
     #: Список предсказанных векторов состояния
-    pred_states: List[np.ndarray] = []
+    pred_states: list[np.ndarray] = []
 
     #: Список предсказанных ковариационных матриц 
-    pred_covs: List[np.ndarray] = []
+    pred_covs: list[np.ndarray] = []
 
     #: Список скорректированных векторов состояния
-    forward_states: List[np.ndarray] = []
+    forward_states: list[np.ndarray] = []
 
     #: Список скорректированных ковариационных матриц
-    forward_sr_covs: List[np.ndarray] = []
+    forward_sr_covs: list[np.ndarray] = []
 
     #: Cписок моментов времени, в которые фильтруем данные
-    times: List[str] = []
+    times: list[str] = []
 
     #: Список всех сигма точек
-    all_sigma_points: List[np.ndarray] = []
+    all_sigma_points: list[np.ndarray] = []
 
     #: Список всех сигма точек, протянутых в моменты 
     #: времени из списка times
-    all_transform_points: List[np.ndarray] = []
+    all_transform_points: list[np.ndarray] = []
 
     #: Набор измерений
     meas: pd.DataFrame
@@ -204,7 +203,7 @@ class UKF:
     sigma: float
 
     #: Список сигм для каждой попытки фильтрации
-    sigma_list: List[float]
+    sigma_list: list[float]
 
     #: Массив весов траекторий
     w_mean: np.ndarray
@@ -223,13 +222,13 @@ class UKF:
             kappa: float = _config.DEFAULT_KAPPA,
             attempts: int = _config.DEFAULT_ATTEMPT,
             dim_x: int = 6,
-            pred_states: List[np.ndarray] = [],
-            pred_covs: List[np.ndarray] = [],
-            forward_states: List[np.ndarray] = [],
-            sr_forward_covs: List[np.ndarray] = [],
-            forward_covs: List[np.ndarray] = [],
-            times: List[str] = [],
-            all_transform_points: List[np.ndarray] = [],
+            pred_states: list[np.ndarray] = [],
+            pred_covs: list[np.ndarray] = [],
+            forward_states: list[np.ndarray] = [],
+            sr_forward_covs: list[np.ndarray] = [],
+            forward_covs: list[np.ndarray] = [],
+            times: list[str] = [],
+            all_transform_points: list[np.ndarray] = [],
         ) -> None:
             """Конструктор сигматочечного фильтра Калмана
             
@@ -496,7 +495,7 @@ class UKF:
         print(f'v0 = {self.state_v}')
         self.cov_matrix = F.T @ self.cov_matrix @ F
       
-    def rts_smoother(self) -> tuple[np.ndarray, List[np.ndarray]]:
+    def rts_smoother(self) -> tuple[np.ndarray, list[np.ndarray]]:
         """ Процесс сглаживания оценки вектора состояния и ковариационной
             матрицы (Unscented Rauch-Tung-Striebel smoother for the additive
             dynamic system).
@@ -546,51 +545,37 @@ class LKF:
         self.meas = meas
         self.cov_meas = R
         self.cov_process = Q
-        self.x_hat = np.zeros((6, ))
-        self.dXkdX0 = np.zeros((6, 6))
-        self.dXlastdX0 = np.zeros((6, 6))
+        self.x_hat = np.zeros((6,))
         self.attempts = attempts
         self.mean_orb = create_orbit(v, self.t_begin)
         self.mean_orb.change_param({'calc_partials': True})
 
-    def calc_partials(self, t_k):
-
+    def step(self, z: pd.Series, t_k: pyorbs.pyorbs.ephem_time):
+        self.mean_orb.setup_parameters()
         self.mean_orb.set_initial_point(self.t_start)
         self.mean_orb.move(t_k)
+        F = self.mean_orb.state_v[6:].reshape(6,6).T.copy() 
 
-        dXkdXlast = self.mean_orb.state_v[6:].reshape(6,6).T.copy()
-        if np.all(self.dXlastdX0 == 0):
-            self.dXkdX0 = dXkdXlast.copy()
-        else:
-            self.dXkdX0 = dXkdXlast.copy() @ self.dXlastdX0.copy()
-        self.dXlastdX0 = self.dXkdX0.copy()
-
-    def step(self, z: pd.Series, t_k: pyorbs.pyorbs.ephem_time):
-
-        self.calc_partials(t_k)
-        Fi = self.dXkdX0 @ np.linalg.inv(self.dXlastdX0)
-
-        x = Fi @ self.x_hat
-        P = Fi @ self.cov @ Fi.T + self.cov_process
+        x = F @ self.x_hat
+        P = F @ self.cov @ F.T + self.cov_process
         
         m = pyorbs.pyorbs_det.Measurements(z.to_frame())
         step = pyorbs.pyorbs_det.newton_step(dim = 42, meas_tab = m.tracking)
 
-        l, H = pyorbs.pyorbs_det.process_meas_record(self.mean_orb, z, dim = 42, step = step)
-        y = l['res'].reshape(2,) * _SEC2RAD
+        meas, H = pyorbs.pyorbs_det.process_meas_record(self.mean_orb, z, dim = 42, step = step)
+        y = meas['res'].reshape(2,) * _SEC2RAD
 
         K = P @ H.T @ np.linalg.inv(H @ P @ H.T + self.cov_meas)
-
         self.x_hat = x + K @ (y - H @ x)
-        self.cov = P - K @ H @ P
+        self.cov = (np.eye(6) - K @ H) @ P
 
-    def get_init_orbit(self):
-
+    def update(self):
         self.mean_orb.move(self.t_begin)
-        #self.mean_orb.structure['calc_partials']
         F = self.mean_orb.state_v[6:].reshape(6,6).T.copy()
         self.t_start, self.cov = self.t_begin, F @ self.cov @ F.T
         self.mean_orb.setup_parameters()
+        self.dXlastdX0 = np.zeros((6,6))
+        self.x_hat = np.zeros((6, ))
 
     def od_filtration(self):
         
@@ -603,11 +588,11 @@ class LKF:
                 self.t_start = t_k
             print(self.x_hat)
             self.mean_orb.state_v[:6] += self.x_hat
-            self.x_hat, self.dXlastdX0 = np.zeros((6, )), np.zeros((6, 6))
-            self.get_init_orbit()
             i+=1
-        
-        self.state_v = self.mean_orb.state_v[:6]
+            if i != self.attempts:
+                self.update()
+
+        self.state_v = self.mean_orb.state_v[:6].copy()
 
 
 class EKF:
